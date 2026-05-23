@@ -63,11 +63,54 @@ async def _load_board(ticker: str, from_date: date, till_date: date, board: str)
 
 
 async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
-    """Загружает дневные свечи. Пробует TQBR, затем TQNE как fallback."""
+    """Загружает дневные свечи. Пробует MOEX ISS (TQBR/TQNE), затем Yahoo Finance как fallback."""
     df = await _load_board(ticker, from_date, till_date, "TQBR")
     if df.empty:
         df = await _load_board(ticker, from_date, till_date, "TQNE")
+    if df.empty:
+        df = await _load_yfinance(ticker, from_date, till_date)
     return df
+
+
+async def _load_yfinance(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
+    """Fallback: загружает свечи через Yahoo Finance (TICKER.ME). Работает с любого IP."""
+    try:
+        import yfinance as yf
+        yf_ticker = f"{ticker}.ME"
+        loop = asyncio.get_event_loop()
+        hist = await loop.run_in_executor(
+            None,
+            lambda: yf.download(
+                yf_ticker,
+                start=str(from_date),
+                end=str(till_date),
+                progress=False,
+                auto_adjust=True,
+            ),
+        )
+        if hist.empty:
+            logger.warning("yfinance: нет данных для %s", ticker)
+            return pd.DataFrame()
+
+        # yfinance возвращает MultiIndex колонки при auto_adjust — выравниваем
+        if isinstance(hist.columns, pd.MultiIndex):
+            hist.columns = hist.columns.get_level_values(0)
+
+        df = pd.DataFrame({
+            "date":   hist.index.date,
+            "open":   hist["Open"].values,
+            "high":   hist["High"].values,
+            "low":    hist["Low"].values,
+            "close":  hist["Close"].values,
+            "volume": hist["Volume"].values,
+        })
+        df = df.dropna(subset=["close"])
+        df = df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
+        logger.info("yfinance: загружено %d свечей для %s", len(df), ticker)
+        return df
+    except Exception as e:
+        logger.warning("yfinance %s: %s", ticker, e)
+        return pd.DataFrame()
 
 
 async def get_dividends(ticker: str) -> list[dict]:
