@@ -18,16 +18,14 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
-async def _warmup_news():
-    """Фоновая загрузка новостей при первом старте."""
-    await asyncio.sleep(10)
+async def _startup_sync():
+    """Фоновая синхронизация данных при старте."""
+    await asyncio.sleep(5)
     try:
-        from data.news_fetcher import refresh_all_news
-        logger.info("Загрузка кэша новостей...")
-        await refresh_all_news()
-        logger.info("Кэш новостей готов")
+        from scheduler.sync import initial_sync
+        await initial_sync()
     except Exception as e:
-        logger.warning("News warmup error: %s", e)
+        logger.warning("Startup sync error: %s", e)
 
 
 async def main():
@@ -60,7 +58,7 @@ async def main():
     scheduler.start()
     logger.info("Планировщик запущен")
 
-    asyncio.create_task(_warmup_news())
+    asyncio.create_task(_startup_sync())
 
     logger.info("Бот запущен")
     try:

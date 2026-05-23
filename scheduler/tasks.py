@@ -201,6 +201,26 @@ async def task_refresh_news():
         logger.warning("News refresh error: %s", e)
 
 
+async def task_sync_prices():
+    """Обновляет цены в кэше БД каждые 5 минут в торговые часы."""
+    from scheduler.sync import sync_prices
+    try:
+        await sync_prices()
+    except Exception as e:
+        logger.warning("sync_prices error: %s", e)
+
+
+async def task_sync_data():
+    """Обновляет фундаментал и пересчитывает сигналы каждые 4 часа."""
+    from scheduler.sync import sync_fundamentals, sync_dividends, sync_signals
+    try:
+        await sync_fundamentals()
+        await sync_dividends()
+        await sync_signals()
+    except Exception as e:
+        logger.warning("sync_data error: %s", e)
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     h, m = MORNING_BRIEF_TIME.split(":")
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
@@ -229,6 +249,16 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler.add_job(
         task_refresh_news, CronTrigger(minute=15),
         id="refresh_news", replace_existing=True,
+    )
+    # Цены каждые 5 минут в торговые часы
+    scheduler.add_job(
+        task_sync_prices, CronTrigger(minute="*/5", hour="9-20", day_of_week="mon-fri"),
+        id="sync_prices", replace_existing=True,
+    )
+    # Фундаментал + сигналы каждые 4 часа
+    scheduler.add_job(
+        task_sync_data, CronTrigger(hour="*/4", minute=30),
+        id="sync_data", replace_existing=True,
     )
 
     return scheduler

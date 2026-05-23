@@ -140,6 +140,28 @@ class AICache(Base):
     created_at   = Column(DateTime, default=datetime.utcnow)
 
 
+class PricesCache(Base):
+    __tablename__ = "prices_cache"
+
+    ticker     = Column(String(10), primary_key=True)
+    price      = Column(Float, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+
+class FundamentalsCache(Base):
+    __tablename__ = "fundamentals_cache"
+
+    ticker         = Column(String(10), primary_key=True)
+    pe             = Column(Float)
+    pb             = Column(Float)
+    ev_ebitda      = Column(Float)
+    div_yield      = Column(Float)
+    debt_ebitda    = Column(Float)
+    revenue_growth = Column(Float)
+    net_margin     = Column(Float)
+    updated_at     = Column(DateTime, nullable=False)
+
+
 async def init_db():
     from sqlalchemy import text
     async with engine.begin() as conn:
@@ -150,11 +172,13 @@ async def init_db():
             "ALTER TABLE macro_data ADD COLUMN imoex_ma50 REAL",
             "ALTER TABLE macro_data ADD COLUMN market_regime VARCHAR(10) DEFAULT 'neutral'",
             "CREATE TABLE IF NOT EXISTS ai_cache (id INTEGER PRIMARY KEY, ticker VARCHAR(10) UNIQUE NOT NULL, analysis TEXT NOT NULL, created_at DATETIME)",
+            "CREATE TABLE IF NOT EXISTS prices_cache (ticker VARCHAR(10) PRIMARY KEY, price REAL NOT NULL, updated_at DATETIME NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS fundamentals_cache (ticker VARCHAR(10) PRIMARY KEY, pe REAL, pb REAL, ev_ebitda REAL, div_yield REAL, debt_ebitda REAL, revenue_growth REAL, net_margin REAL, updated_at DATETIME NOT NULL)",
         ]:
             try:
                 await conn.execute(text(sql))
             except Exception:
-                pass  # столбец уже существует
+                pass  # столбец/таблица уже существует
 
 
 async def get_session() -> AsyncSession:

@@ -342,11 +342,12 @@ async def _handle_signals(target, edit: bool = False):
 
 
 async def _handle_analyze(target, ticker: str, edit: bool = False):
-    from data.tinkoff_client import get_last_prices, get_fundamentals
-    from data.moex_client import get_dividends
+    from db.models import SessionLocal, PricesCache, FundamentalsCache, Dividend
+    from sqlalchemy import select
     from data.news_fetcher import fetch_news_for_ticker
     from analysis.signals import generate_signal
     from ai.analyst import get_ai_analysis
+    import asyncio
 
     all_stocks = {**BLUE_CHIPS, **RISKY_STOCKS}
     if ticker not in all_stocks:
@@ -357,22 +358,78 @@ async def _handle_analyze(target, ticker: str, edit: bool = False):
             await target.answer(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
         return
 
-    import asyncio
-    candles, prices, fundamentals, dividends, macro, news = await asyncio.gather(
+    # Параллельно: свечи из БД + макро из кэша + новости из кэша
+    candles, macro, news = await asyncio.gather(
         _load_candles(ticker),
-        get_last_prices([ticker]),
-        get_fundamentals(ticker),
-        get_dividends(ticker),
         _get_macro(),
         fetch_news_for_ticker(ticker),
+        return_exceptions=True,
     )
+    if isinstance(candles, Exception):
+        candles = pd.DataFrame()
+    if isinstance(macro, Exception):
+        from analysis.macro import MacroContext
+        macro = MacroContext()
+    if isinstance(news, Exception):
+        news = []
 
-    result = await generate_signal(ticker, candles, fundamentals, dividends, macro, prices.get(ticker))
+    # Читаем цену, фундаментал, дивиденды из кэша БД
+    async with SessionLocal() as db:
+        price_row = (await db.execute(
+            select(PricesCache).where(PricesCache.ticker == ticker)
+        )).scalar_one_or_none()
+        fund_row = (await db.execute(
+            select(FundamentalsCache).where(FundamentalsCache.ticker == ticker)
+        )).scalar_one_or_none()
+        div_rows = (await db.execute(
+            select(Dividend)
+            .where(Dividend.ticker == ticker)
+            .order_by(Dividend.ex_date.desc())
+            .limit(10)
+        )).scalars().all()
+
+    price = price_row.price if price_row else None
+    fundamentals = {}
+    if fund_row:
+        fundamentals = {
+            "pe": fund_row.pe, "pb": fund_row.pb, "ev_ebitda": fund_row.ev_ebitda,
+            "div_yield": fund_row.div_yield, "debt_ebitda": fund_row.debt_ebitda,
+            "revenue_growth": fund_row.revenue_growth, "net_margin": fund_row.net_margin,
+        }
+    dividends = [
+        {"ex_date": str(r.ex_date), "amount": r.amount, "currency": r.currency}
+        for r in div_rows
+    ]
+
+    # Если кэш пустой — пробуем живые API как запасной вариант
+    if price is None:
+        try:
+            from data.tinkoff_client import get_last_prices
+            prices_map = await get_last_prices([ticker])
+            price = prices_map.get(ticker)
+        except Exception:
+            pass
+
+    if not fundamentals:
+        try:
+            from data.tinkoff_client import get_fundamentals
+            fundamentals = await get_fundamentals(ticker) or {}
+        except Exception:
+            pass
+
+    if not dividends:
+        try:
+            from data.moex_client import get_dividends
+            dividends = await get_dividends(ticker) or []
+        except Exception:
+            pass
+
+    result = await generate_signal(ticker, candles, fundamentals, dividends, macro, price)
     result.ai_text = await get_ai_analysis(result, macro, news)
 
     # Сохраняем сигнал в историю
     try:
-        from db.models import SessionLocal, SignalHistory
+        from db.models import SignalHistory
         async with SessionLocal() as db:
             db.add(SignalHistory(
                 ticker=ticker,

@@ -1,11 +1,14 @@
 from __future__ import annotations
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from urllib.parse import quote
 import aiohttp
 import feedparser
 from config import BLUE_CHIPS, RISKY_STOCKS
+
+_executor = ThreadPoolExecutor(max_workers=2)
 
 logger = logging.getLogger("news")
 
@@ -78,7 +81,9 @@ async def _fetch_gnews(session: aiohttp.ClientSession, ticker: str) -> list[dict
             headers={"User-Agent": "Mozilla/5.0"},
         ) as r:
             content = await r.read()
-        feed = feedparser.parse(content)
+        # feedparser is synchronous — run in executor to avoid blocking event loop
+        loop = asyncio.get_event_loop()
+        feed = await loop.run_in_executor(_executor, feedparser.parse, content)
         items = []
         for entry in feed.entries[:20]:
             title = entry.get("title", "").strip()
@@ -135,8 +140,12 @@ async def _save_news_to_db(items: list[dict]) -> None:
 
 async def refresh_news_for_ticker(ticker: str) -> list[dict]:
     """Загружает свежие новости из Google News и сохраняет в БД."""
-    async with aiohttp.ClientSession() as session:
-        items = await _fetch_gnews(session, ticker)
+    connector = aiohttp.TCPConnector(force_close=True)
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            items = await _fetch_gnews(session, ticker)
+    finally:
+        await connector.close()
     await _save_news_to_db(items)
     if items:
         logger.debug("News cached for %s: %d items", ticker, len(items))
@@ -146,11 +155,15 @@ async def refresh_news_for_ticker(ticker: str) -> list[dict]:
 async def refresh_all_news():
     """Обновляет новости для всех акций (вызывается планировщиком)."""
     all_tickers = list({**BLUE_CHIPS, **RISKY_STOCKS}.keys())
-    async with aiohttp.ClientSession() as session:
-        for ticker in all_tickers:
-            items = await _fetch_gnews(session, ticker)
-            await _save_news_to_db(items)
-            await asyncio.sleep(0.5)
+    connector = aiohttp.TCPConnector(force_close=True, limit=3)
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            for ticker in all_tickers:
+                items = await _fetch_gnews(session, ticker)
+                await _save_news_to_db(items)
+                await asyncio.sleep(1.0)
+    finally:
+        await connector.close()
     logger.info("News refresh complete for %d tickers", len(all_tickers))
 
 
