@@ -1,5 +1,4 @@
 aiogram==3.13.0
-tinkoff-investments==0.2.0b67
 google-generativeai==0.8.3
 apscheduler==3.10.4
 aiohttp==3.9.5
