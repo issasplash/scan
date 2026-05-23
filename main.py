@@ -20,7 +20,7 @@ logger = logging.getLogger("main")
 
 async def _warmup_news():
     """Фоновая загрузка новостей при первом старте."""
-    await asyncio.sleep(5)  # дать боту подняться
+    await asyncio.sleep(10)
     try:
         from data.news_fetcher import refresh_all_news
         logger.info("Загрузка кэша новостей...")
@@ -38,16 +38,18 @@ async def main():
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    class NoVerifySession(AiohttpSession):
-        async def create_session(self):
-            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-            return aiohttp.ClientSession(connector=connector)
+    # Один коннектор на весь lifetime бота — не создаём новый при каждом запросе
+    connector = aiohttp.TCPConnector(ssl=ssl_ctx, force_close=False, enable_cleanup_closed=True)
 
-    session = NoVerifySession()
+    class NoVerifySession(AiohttpSession):
+        async def create_session(self) -> aiohttp.ClientSession:
+            return aiohttp.ClientSession(connector=connector, connector_owner=False)
+
+    tg_session = NoVerifySession()
 
     bot = Bot(
         token=TELEGRAM_TOKEN,
-        session=session,
+        session=tg_session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
@@ -58,7 +60,6 @@ async def main():
     scheduler.start()
     logger.info("Планировщик запущен")
 
-    # Фоновый прогрев кэша новостей при старте
     asyncio.create_task(_warmup_news())
 
     logger.info("Бот запущен")
@@ -67,6 +68,7 @@ async def main():
     finally:
         scheduler.shutdown()
         await bot.session.close()
+        await connector.close()
 
 
 if __name__ == "__main__":
