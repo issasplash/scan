@@ -122,14 +122,24 @@ class NewsCache(Base):
     id           = Column(Integer, primary_key=True, autoincrement=True)
     ticker       = Column(String(10), nullable=False, index=True)
     title        = Column(Text, nullable=False)
+    source       = Column(String(100), default="")
     url          = Column(Text, default="")
     published_at = Column(DateTime)
     fetched_at   = Column(DateTime, default=datetime.utcnow)
 
 
 async def init_db():
+    from sqlalchemy import text
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Миграции — добавляем новые столбцы если их ещё нет
+        for sql in [
+            "ALTER TABLE news_cache ADD COLUMN source VARCHAR(100) DEFAULT ''",
+        ]:
+            try:
+                await conn.execute(text(sql))
+            except Exception:
+                pass  # столбец уже существует
 
 
 async def get_session() -> AsyncSession:

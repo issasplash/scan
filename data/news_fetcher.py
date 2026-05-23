@@ -12,32 +12,44 @@ logger = logging.getLogger("news")
 # Google News RSS — работает с любого IP в мире
 _GNEWS = "https://news.google.com/rss/search"
 
-# Поисковые запросы для каждого тикера
+# Поисковые запросы — фокус на событиях, не на цене
 _QUERIES: dict[str, str] = {
-    "LKOH":  "Лукойл LKOH акции",
-    "SBER":  "Сбербанк Сбер акции",
-    "TATN":  "Татнефть TATN акции",
-    "GAZP":  "Газпром GAZP акции",
-    "NVTK":  "Новатэк NVTK акции",
-    "ROSN":  "Роснефть ROSN акции",
-    "GMKN":  "Норникель GMKN акции",
-    "CHMF":  "Северсталь CHMF акции",
-    "NLMK":  "НЛМК NLMK акции",
-    "MAGN":  "ММК MAGN акции",
-    "PLZL":  "Полюс PLZL акции",
-    "ALRS":  "Алроса ALRS акции",
-    "VTBR":  "ВТБ банк акции",
-    "MGNT":  "Магнит MGNT акции",
-    "FIVE":  "X5 RetailGroup акции",
-    "YNDX":  "Яндекс YNDX акции",
-    "MTSS":  "МТС MTSS акции",
-    "PHOR":  "ФосАгро PHOR акции",
-    "POSI":  "Позитив Технологии POSI акции",
-    "HEAD":  "HeadHunter HEAD акции",
-    "WUSH":  "Whoosh WUSH самокаты акции",
-    "OZON":  "OZON маркетплейс акции",
-    "ASTR":  "Астра ASTR акции",
+    "LKOH":  "Лукойл дивиденды отчёт прибыль санкции",
+    "SBER":  "Сбербанк дивиденды отчёт прибыль результаты",
+    "TATN":  "Татнефть дивиденды отчёт прибыль",
+    "GAZP":  "Газпром дивиденды отчёт экспорт газ",
+    "NVTK":  "Новатэк СПГ дивиденды санкции отчёт",
+    "ROSN":  "Роснефть дивиденды отчёт нефть добыча",
+    "GMKN":  "Норникель дивиденды отчёт никель палладий",
+    "CHMF":  "Северсталь дивиденды отчёт сталь производство",
+    "NLMK":  "НЛМК дивиденды отчёт сталь прокат",
+    "MAGN":  "ММК дивиденды отчёт сталь Магнитогорск",
+    "PLZL":  "Полюс золото дивиденды отчёт добыча",
+    "ALRS":  "Алроса алмазы дивиденды отчёт санкции",
+    "VTBR":  "ВТБ банк дивиденды отчёт прибыль капитал",
+    "MGNT":  "Магнит дивиденды отчёт выручка сеть",
+    "FIVE":  "X5 RetailGroup Пятёрочка дивиденды отчёт выручка",
+    "YNDX":  "Яндекс отчёт выручка прибыль сделка",
+    "MTSS":  "МТС дивиденды отчёт выручка абоненты",
+    "PHOR":  "ФосАгро дивиденды отчёт удобрения прибыль",
+    "POSI":  "Позитив технологии отчёт выручка кибербезопасность",
+    "HEAD":  "HeadHunter отчёт выручка вакансии прибыль",
+    "WUSH":  "Whoosh самокаты отчёт выручка IPO",
+    "OZON":  "Озон OZON отчёт выручка GMV прибыль",
+    "ASTR":  "Астра ОС отчёт выручка импортозамещение",
 }
+
+# Шаблонные фразы которые означают "не новость, а шум"
+_BORING_PATTERNS = [
+    "торгуются у уровня",
+    "торгуется у уровня",
+    "технический анализ на бкс",
+    "акции пао",
+    "рынок мосбиржа",
+    "цена акций сегодня",
+    "котировки акций",
+    "курс акций",
+]
 
 
 def _gnews_url(ticker: str) -> str:
@@ -55,6 +67,12 @@ def _parse_published(entry) -> datetime | None:
     return None
 
 
+def _is_interesting(title: str) -> bool:
+    """Отфильтровывает шаблонные заголовки без смысла."""
+    low = title.lower()
+    return not any(p in low for p in _BORING_PATTERNS)
+
+
 async def _fetch_gnews(session: aiohttp.ClientSession, ticker: str) -> list[dict]:
     url = _gnews_url(ticker)
     try:
@@ -66,14 +84,21 @@ async def _fetch_gnews(session: aiohttp.ClientSession, ticker: str) -> list[dict
             content = await r.read()
         feed = feedparser.parse(content)
         items = []
-        for entry in feed.entries[:10]:
+        for entry in feed.entries[:20]:
             title = entry.get("title", "").strip()
             link = entry.get("link", "")
             pub = _parse_published(entry)
-            if title:
+            if title and _is_interesting(title):
+                # Убираем " - Источник" в конце заголовка Google News
+                source = ""
+                if " - " in title:
+                    parts = title.rsplit(" - ", 1)
+                    title = parts[0].strip()
+                    source = parts[1].strip()
                 items.append({
                     "ticker": ticker,
                     "title": title,
+                    "source": source,
                     "url": link,
                     "published_at": pub,
                 })
@@ -97,6 +122,7 @@ async def refresh_news_for_ticker(ticker: str) -> list[dict]:
                 stmt = sqlite_insert(NewsCache).values(
                     ticker=item["ticker"],
                     title=item["title"],
+                    source=item.get("source", ""),
                     url=item["url"] or "",
                     published_at=item["published_at"],
                     fetched_at=datetime.now(timezone.utc),
@@ -122,6 +148,7 @@ async def refresh_all_news():
                         stmt = sqlite_insert(NewsCache).values(
                             ticker=item["ticker"],
                             title=item["title"],
+                            source=item.get("source", ""),
                             url=item["url"] or "",
                             published_at=item["published_at"],
                             fetched_at=datetime.now(timezone.utc),

@@ -206,7 +206,19 @@ async def cb_news_pick(cq: CallbackQuery):
 async def cb_analyze(cq: CallbackQuery):
     ticker = cq.data.split(":")[1]
     await cq.answer(f"⏳ Анализирую {ticker}...")
-    await _handle_analyze(cq.message, ticker, edit=True)
+    try:
+        await _handle_analyze(cq.message, ticker, edit=True)
+    except Exception as e:
+        import logging
+        logging.getLogger("callbacks").error("analyze %s: %s", ticker, e, exc_info=True)
+        try:
+            await cq.message.edit_text(
+                f"⚠️ Ошибка при анализе <b>{ticker}</b>. Попробуй ещё раз.",
+                parse_mode="HTML",
+                reply_markup=kb.back_to_menu(),
+            )
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith("news:"))
