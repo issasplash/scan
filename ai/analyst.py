@@ -79,7 +79,7 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
     return "\n".join(l for l in lines if l is not None)
 
 
-_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
+_GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
 
 
 async def _gemini_call(prompt: str, model: str) -> str:
