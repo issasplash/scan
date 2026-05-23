@@ -59,13 +59,25 @@ async def _get_macro():
         cached = result.scalar_one_or_none()
 
     if cached:
-        return MacroContext(
+        ctx = MacroContext(
             brent=cached.brent,
             usd_rub=cached.usd_rub,
             cbr_rate=cached.cbr_rate,
             imoex=cached.imoex,
-            market_regime="neutral",
+            imoex_ma50=cached.imoex_ma50,
+            market_regime=cached.market_regime or "neutral",
         )
+        if cached.cbr_rate:
+            if cached.cbr_rate >= 18:
+                ctx.signals.append(f"Ставка ЦБ {cached.cbr_rate}% — высокая, давление на акции ⚠️")
+            elif cached.cbr_rate <= 10:
+                ctx.signals.append(f"Ставка ЦБ {cached.cbr_rate}% — низкая, позитив для акций ✅")
+        if cached.imoex and cached.imoex_ma50:
+            if ctx.market_regime == "bullish":
+                ctx.signals.append(f"IMOEX {cached.imoex:.0f} выше MA50 ({cached.imoex_ma50:.0f}) — рынок растёт ✅")
+            elif ctx.market_regime == "bearish":
+                ctx.signals.append(f"IMOEX {cached.imoex:.0f} ниже MA50 ({cached.imoex_ma50:.0f}) — рынок падает ⚠️")
+        return ctx
 
     imoex_hist = await get_imoex_history(210)
     return await get_macro_context(imoex_hist)
@@ -219,8 +231,7 @@ async def cb_analyze(cq: CallbackQuery):
     try:
         await _handle_analyze(cq.message, ticker, edit=True)
     except Exception as e:
-        import logging
-        logging.getLogger("callbacks").error("analyze %s: %s", ticker, e, exc_info=True)
+        logger.error("analyze %s: %s", ticker, e, exc_info=True)
         try:
             await cq.message.edit_text(
                 f"⚠️ Ошибка при анализе <b>{ticker}</b>. Попробуй ещё раз.",
@@ -319,7 +330,6 @@ async def _handle_signals(target, edit: bool = False):
         divs = await get_dividends(ticker)
         result = await generate_signal(ticker, candles, {}, divs, macro, prices.get(ticker))
         signals_map[ticker] = result.signal
-        from bot.handlers.callbacks import _SIGNAL_LABEL
         label = _SIGNAL_LABEL.get(result.signal, result.signal)
         p = f"{result.price:,.0f} ₽" if result.price else ""
         lines.append(f"{label.split()[0]} <b>{ticker}</b> {info['name']}  {p}")
@@ -417,13 +427,12 @@ async def _handle_news(target, ticker: str, edit: bool = False):
     lines = [f"📰 <b>Новости: {name} ({ticker})</b>\n"]
     if news:
         for item in news:
-            title = item["title"][:120]
-            pub = item.get("published", "")[:16]
-            link = item.get("link", "")
+            title = _esc(item.get("title", "")[:120])
+            link = item.get("url", "")
             if link:
-                lines.append(f"• <a href='{link}'>{title}</a> <i>{pub}</i>")
+                lines.append(f'• <a href="{link}">{title}</a>')
             else:
-                lines.append(f"• {title} <i>{pub}</i>")
+                lines.append(f"• {title}")
     else:
         lines.append("Свежих новостей не найдено.")
 

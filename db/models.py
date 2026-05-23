@@ -38,12 +38,14 @@ class MacroData(Base):
     __tablename__ = "macro_data"
     __table_args__ = (UniqueConstraint("date"),)
 
-    id         = Column(Integer, primary_key=True, autoincrement=True)
-    date       = Column(Date, nullable=False, index=True)
-    brent      = Column(Float)
-    usd_rub    = Column(Float)
-    cbr_rate   = Column(Float)
-    imoex      = Column(Float)
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    date          = Column(Date, nullable=False, index=True)
+    brent         = Column(Float)
+    usd_rub       = Column(Float)
+    cbr_rate      = Column(Float)
+    imoex         = Column(Float)
+    imoex_ma50    = Column(Float)
+    market_regime = Column(String(10), default="neutral")
 
 
 class Dividend(Base):
@@ -135,6 +137,8 @@ async def init_db():
         # Миграции — добавляем новые столбцы если их ещё нет
         for sql in [
             "ALTER TABLE news_cache ADD COLUMN source VARCHAR(100) DEFAULT ''",
+            "ALTER TABLE macro_data ADD COLUMN imoex_ma50 REAL",
+            "ALTER TABLE macro_data ADD COLUMN market_regime VARCHAR(10) DEFAULT 'neutral'",
         ]:
             try:
                 await conn.execute(text(sql))

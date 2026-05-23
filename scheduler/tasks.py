@@ -187,6 +187,8 @@ async def task_cache_macro():
             usd_rub=macro.usd_rub,
             cbr_rate=macro.cbr_rate,
             imoex=macro.imoex,
+            imoex_ma50=macro.imoex_ma50,
+            market_regime=macro.market_regime,
         ).on_conflict_do_nothing()
         await session.execute(stmt)
         await session.commit()

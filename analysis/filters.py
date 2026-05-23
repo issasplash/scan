@@ -38,11 +38,9 @@ def check(
             and tech.price_change_30d is not None and tech.price_change_30d > 5):
         warnings.append("⚠️ Объём падает при росте цены — признак слабости")
 
-    # Акция у 52-недельного максимума
-    if (tech.high_52w is not None and tech.resistance is not None):
-        from analysis.technical import TechnicalResult
-        price = tech.resistance  # используем resistance как прокси текущей цены
-        if tech.high_52w and abs(price - tech.high_52w) / tech.high_52w < 0.03:
+    # Акция у 52-недельного максимума (resistance = 40-дневный максимум как прокси цены)
+    if tech.high_52w is not None and tech.resistance is not None:
+        if abs(tech.resistance - tech.high_52w) / tech.high_52w < 0.03:
             warnings.append("⚠️ Акция у 52-недельного максимума — осторожно при входе")
 
     # --- Дивидендные ловушки ---
