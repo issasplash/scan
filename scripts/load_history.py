@@ -61,7 +61,7 @@ async def main():
         except Exception as e:
             logger.error("%s — ошибка: %s", ticker, e)
 
-        await asyncio.sleep(0.5)  # уважаем MOEX ISS
+        await asyncio.sleep(1.5)  # уважаем MOEX ISS — не спешим
 
     logger.info("✅ Загрузка истории завершена")
 

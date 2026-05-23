@@ -24,7 +24,7 @@ async def _get_brent() -> float | None:
     url = "https://query1.finance.yahoo.com/v8/finance/chart/BZ=F"
     params = {"interval": "1d", "range": "5d"}
     try:
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10),
                                    headers={"User-Agent": "Mozilla/5.0"}) as r:
                 data = await r.json()
@@ -40,7 +40,7 @@ async def _get_cbr_rate() -> float | None:
     """Текущая ключевая ставка ЦБ РФ (парсинг сайта ЦБ)."""
     url = "https://www.cbr.ru/hd_base/KeyRate/"
     try:
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 html = await r.text(encoding="utf-8", errors="ignore")
         # Ищем строку вида "21,00" или "16,00" в таблице
