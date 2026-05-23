@@ -86,7 +86,7 @@ async def _gemini(prompt: str) -> str:
         model_name="gemini-1.5-flash",
         system_instruction=_SYSTEM,
     )
-    response = model.generate_content(prompt)
+    response = await model.generate_content_async(prompt)
     return response.text.strip()
 
 

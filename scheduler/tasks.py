@@ -4,7 +4,7 @@ import logging
 from datetime import date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from config import MORNING_BRIEF_TIME, BLUE_CHIPS, ALERT_RSI_OVERSOLD, ALERT_RSI_OVERBOUGHT, ALERT_VOLUME_SPIKE
+from config import MORNING_BRIEF_TIME, BLUE_CHIPS, RISKY_STOCKS, ALERT_RSI_OVERSOLD, ALERT_RSI_OVERBOUGHT, ALERT_VOLUME_SPIKE
 from aiogram import Bot
 
 logger = logging.getLogger("scheduler")
@@ -147,7 +147,7 @@ async def task_update_history(bot: Bot):
 
     yesterday = date.today() - timedelta(days=1)
 
-    for ticker in BLUE_CHIPS:
+    for ticker in list(BLUE_CHIPS.keys()) + list(RISKY_STOCKS.keys()):
         try:
             df = await get_candles(ticker, yesterday, date.today())
             if df.empty:

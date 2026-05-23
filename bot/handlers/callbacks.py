@@ -186,6 +186,12 @@ async def cb_watchlist(cq: CallbackQuery):
     await cq.answer()
 
 
+@router.callback_query(F.data == "menu:portfolio")
+async def cb_portfolio(cq: CallbackQuery):
+    await cq.answer()
+    await _handle_portfolio(cq.message, cq.from_user.id, edit=True)
+
+
 @router.callback_query(F.data == "menu:news_pick")
 async def cb_news_pick(cq: CallbackQuery):
     await cq.message.edit_text(
@@ -231,6 +237,25 @@ async def cb_setting(cq: CallbackQuery):
             await session.commit()
     await _handle_settings(cq.message, user_id=cq.from_user.id, edit=True)
     await cq.answer()
+
+
+@router.callback_query(F.data == "wl_add")
+async def cb_wl_add(cq: CallbackQuery):
+    await cq.answer(
+        "Добавить акцию: /watchlist add ТИКЕР\nНапример: /watchlist add SBER",
+        show_alert=True,
+    )
+
+
+@router.callback_query(F.data.startswith("alert_add:"))
+async def cb_alert_add(cq: CallbackQuery):
+    ticker = cq.data.split(":")[1]
+    await cq.answer(
+        f"✅ {ticker} отслеживается автоматически.\n"
+        "Алерты по RSI приходят когда RSI < 30 или > 70.\n"
+        "Управление в /settings → Алерты",
+        show_alert=True,
+    )
 
 
 @router.callback_query(F.data.startswith("wl_remove:"))
@@ -460,6 +485,62 @@ async def _handle_settings(target, user_id: int | None = None, edit: bool = Fals
         await target.edit_text(text, parse_mode="HTML", reply_markup=markup)
     else:
         await target.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+async def _handle_portfolio(target, user_id: int, edit: bool = False):
+    from db.models import SessionLocal, User, Watchlist
+    from sqlalchemy import select
+    from config import SECTOR_LABELS
+
+    async with SessionLocal() as session:
+        user = await session.get(User, user_id)
+        wl_result = await session.execute(
+            select(Watchlist).where(Watchlist.user_id == user_id)
+        )
+        wl_tickers = [r.ticker for r in wl_result.scalars().all()]
+
+    all_stocks = {**BLUE_CHIPS, **RISKY_STOCKS}
+    bank = user.bank_size if user else None
+
+    lines = ["💼 <b>Портфель</b>\n"]
+
+    if bank:
+        lines.append(f"💰 Размер банка: <b>{bank:,.0f} ₽</b>")
+        lines.append(f"   Голубые фишки (80%): {bank * 0.8:,.0f} ₽")
+        lines.append(f"   Идеи роста (20%): {bank * 0.2:,.0f} ₽\n")
+    else:
+        lines.append("💰 Размер банка не задан → /setbank 500000\n")
+
+    if wl_tickers:
+        lines.append("📋 <b>Мой вотчлист:</b>")
+        sector_groups: dict[str, list[str]] = {}
+        for t in wl_tickers:
+            sec = all_stocks.get(t, {}).get("sector", "other")
+            sector_groups.setdefault(sec, []).append(t)
+
+        for sec, tickers in sector_groups.items():
+            label = SECTOR_LABELS.get(sec, sec)
+            lines.append(f"{label}: {', '.join(tickers)}")
+
+        if len(sector_groups) == 1:
+            lines.append("\n⚠️ <i>Весь вотчлист в одном секторе — риск концентрации</i>")
+    else:
+        lines.append("📋 Вотчлист пуст → добавь акции через /watchlist add TICKER")
+
+    lines += [
+        "",
+        "━━━━ РАСПРЕДЕЛЕНИЕ ━━━━",
+    ]
+    for sec, info in SECTOR_LABELS.items():
+        lines.append(f"{info}")
+
+    lines.append("\n<i>Рекомендуется: не более 40% в одном секторе</i>")
+
+    text = "\n".join(lines)
+    if edit:
+        await target.edit_text(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
 
 
 async def _handle_watchlist(target, user_id: int, edit: bool = False):

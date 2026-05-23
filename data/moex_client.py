@@ -18,47 +18,58 @@ async def _get(session: aiohttp.ClientSession, url: str, params: dict | None = N
         return await r.json(content_type=None)
 
 
-async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
-    """Загружает дневные свечи с MOEX ISS (пагинация по 100 записей)."""
+async def _get_candles_from_board(
+    session: aiohttp.ClientSession,
+    ticker: str,
+    from_date: date,
+    till_date: date,
+    board: str,
+) -> list[dict]:
+    """Загружает свечи с конкретной доски MOEX ISS."""
     rows = []
     start = 0
-    url = f"{BASE}/history/engines/stock/markets/shares/boards/TQBR/securities/{ticker}/candles.json"
+    url = f"{BASE}/history/engines/stock/markets/shares/boards/{board}/securities/{ticker}/candles.json"
 
+    while True:
+        params = {"from": str(from_date), "till": str(till_date), "interval": 24, "start": start}
+        try:
+            data = await _get(session, url, params)
+        except Exception as e:
+            logger.warning("MOEX candles %s/%s error: %s", board, ticker, e)
+            break
+
+        candles = data.get("candles", {})
+        cols = candles.get("columns", [])
+        batch = candles.get("data", [])
+        if not batch:
+            break
+
+        col_map = {c: i for i, c in enumerate(cols)}
+        for row in batch:
+            rows.append({
+                "date":   row[col_map["begin"]][:10],
+                "open":   row[col_map["open"]],
+                "high":   row[col_map["high"]],
+                "low":    row[col_map["low"]],
+                "close":  row[col_map["close"]],
+                "volume": row[col_map["volume"]],
+            })
+
+        start += len(batch)
+        if len(batch) < 100:
+            break
+        await asyncio.sleep(0.2)
+
+    return rows
+
+
+async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
+    """Загружает дневные свечи с MOEX ISS. Пробует TQBR, затем TQNE как fallback."""
     async with aiohttp.ClientSession() as session:
-        while True:
-            params = {
-                "from": str(from_date),
-                "till": str(till_date),
-                "interval": 24,
-                "start": start,
-            }
-            try:
-                data = await _get(session, url, params)
-            except Exception as e:
-                logger.warning("MOEX candles %s error: %s", ticker, e)
+        for board in ("TQBR", "TQNE"):
+            rows = await _get_candles_from_board(session, ticker, from_date, till_date, board)
+            if rows:
                 break
-
-            candles = data.get("candles", {})
-            cols = candles.get("columns", [])
-            batch = candles.get("data", [])
-            if not batch:
-                break
-
-            col_map = {c: i for i, c in enumerate(cols)}
-            for row in batch:
-                rows.append({
-                    "date":   row[col_map["begin"]][:10],
-                    "open":   row[col_map["open"]],
-                    "high":   row[col_map["high"]],
-                    "low":    row[col_map["low"]],
-                    "close":  row[col_map["close"]],
-                    "volume": row[col_map["volume"]],
-                })
-
-            start += len(batch)
-            if len(batch) < 100:
-                break
-            await asyncio.sleep(0.2)
 
     if not rows:
         return pd.DataFrame()
