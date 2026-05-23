@@ -12,6 +12,11 @@ BASE = "https://iss.moex.com/iss"
 HEADERS = {"Accept-Encoding": "gzip"}
 
 
+def _session() -> aiohttp.ClientSession:
+    """Создаёт сессию с force_close=True, чтобы не оставлять keep-alive соединений."""
+    return aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True))
+
+
 async def _get(session: aiohttp.ClientSession, url: str, params: dict | None = None) -> dict:
     async with session.get(url, params=params or {}, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as r:
         r.raise_for_status()
@@ -65,7 +70,7 @@ async def _get_candles_from_board(
 
 async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
     """Загружает дневные свечи с MOEX ISS. Пробует TQBR, затем TQNE как fallback."""
-    async with aiohttp.ClientSession() as session:
+    async with _session() as session:
         for board in ("TQBR", "TQNE"):
             rows = await _get_candles_from_board(session, ticker, from_date, till_date, board)
             if rows:
@@ -83,7 +88,7 @@ async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataF
 async def get_dividends(ticker: str) -> list[dict]:
     """Возвращает историю дивидендов и ближайшие выплаты."""
     url = f"{BASE}/securities/{ticker}/dividends.json"
-    async with aiohttp.ClientSession() as session:
+    async with _session() as session:
         try:
             data = await _get(session, url)
         except Exception as e:
@@ -111,7 +116,7 @@ async def get_dividends(ticker: str) -> list[dict]:
 async def get_usd_rub() -> float | None:
     """Текущий курс USD/RUB с MOEX."""
     url = f"{BASE}/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json"
-    async with aiohttp.ClientSession() as session:
+    async with _session() as session:
         try:
             data = await _get(session, url)
             md = data.get("marketdata", {})
@@ -130,7 +135,7 @@ async def get_usd_rub() -> float | None:
 async def get_imoex() -> float | None:
     """Текущее значение индекса ММВБ (IMOEX)."""
     url = f"{BASE}/engines/stock/markets/index/securities/IMOEX.json"
-    async with aiohttp.ClientSession() as session:
+    async with _session() as session:
         try:
             data = await _get(session, url)
             md = data.get("marketdata", {})
@@ -154,7 +159,7 @@ async def get_imoex_history(days: int = 210) -> pd.DataFrame:
     url = f"{BASE}/history/engines/stock/markets/index/boards/SNDX/securities/IMOEX/candles.json"
     rows = []
     start = 0
-    async with aiohttp.ClientSession() as session:
+    async with _session() as session:
         while True:
             params = {"from": str(frm), "till": str(till), "interval": 24, "start": start}
             try:
@@ -187,7 +192,7 @@ async def get_imoex_history(days: int = 210) -> pd.DataFrame:
 async def get_ofz_list() -> list[dict]:
     """Список ОФЗ с доходностью (TQOB board)."""
     url = f"{BASE}/engines/stock/markets/bonds/boards/TQOB/securities.json"
-    async with aiohttp.ClientSession() as session:
+    async with _session() as session:
         try:
             data = await _get(session, url)
         except Exception as e:

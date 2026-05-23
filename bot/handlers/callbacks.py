@@ -488,59 +488,90 @@ async def _handle_settings(target, user_id: int | None = None, edit: bool = Fals
 
 
 async def _handle_portfolio(target, user_id: int, edit: bool = False):
-    from db.models import SessionLocal, User, Watchlist
-    from sqlalchemy import select
-    from config import SECTOR_LABELS
+    from data.tinkoff_client import get_portfolio, get_accounts
+    from db.models import SessionLocal, User
 
     async with SessionLocal() as session:
         user = await session.get(User, user_id)
-        wl_result = await session.execute(
-            select(Watchlist).where(Watchlist.user_id == user_id)
-        )
-        wl_tickers = [r.ticker for r in wl_result.scalars().all()]
 
-    all_stocks = {**BLUE_CHIPS, **RISKY_STOCKS}
     bank = user.bank_size if user else None
 
-    lines = ["💼 <b>Портфель</b>\n"]
+    # Получаем реальный портфель из T-Invest
+    portfolio = await get_portfolio()
 
-    if bank:
-        lines.append(f"💰 Размер банка: <b>{bank:,.0f} ₽</b>")
-        lines.append(f"   Голубые фишки (80%): {bank * 0.8:,.0f} ₽")
-        lines.append(f"   Идеи роста (20%): {bank * 0.2:,.0f} ₽\n")
-    else:
-        lines.append("💰 Размер банка не задан → /setbank 500000\n")
+    if not portfolio:
+        lines = [
+            "💼 <b>Портфель</b>\n",
+            "⚠️ Портфель T-Invest недоступен.",
+            "Проверь TINKOFF_API_TOKEN в .env",
+        ]
+        if bank:
+            lines += ["", f"💰 Банк (вручную): <b>{bank:,.0f} ₽</b>"]
+        text = "\n".join(lines)
+        if edit:
+            await target.edit_text(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
+        else:
+            await target.answer(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
+        return
 
-    if wl_tickers:
-        lines.append("📋 <b>Мой вотчлист:</b>")
-        sector_groups: dict[str, list[str]] = {}
-        for t in wl_tickers:
-            sec = all_stocks.get(t, {}).get("sector", "other")
-            sector_groups.setdefault(sec, []).append(t)
+    total = portfolio["total_value"]
+    shares = portfolio["total_shares"]
+    bonds  = portfolio["total_bonds"]
+    cash   = portfolio["total_cash"]
+    positions = portfolio["positions"]
 
-        for sec, tickers in sector_groups.items():
-            label = SECTOR_LABELS.get(sec, sec)
-            lines.append(f"{label}: {', '.join(tickers)}")
+    lines = [f"💼 <b>Мой портфель T-Invest</b>\n"]
 
-        if len(sector_groups) == 1:
-            lines.append("\n⚠️ <i>Весь вотчлист в одном секторе — риск концентрации</i>")
-    else:
-        lines.append("📋 Вотчлист пуст → добавь акции через /watchlist add TICKER")
+    # Итоговая сумма
+    lines.append(f"💰 <b>Итого: {total:,.0f} ₽</b>")
+    if shares > 0:
+        lines.append(f"  📈 Акции:     {shares:>12,.0f} ₽  ({shares/total*100:.0f}%)")
+    if bonds > 0:
+        lines.append(f"  🏦 Облигации: {bonds:>12,.0f} ₽  ({bonds/total*100:.0f}%)")
+    if cash > 0:
+        lines.append(f"  💵 Кэш:       {cash:>12,.0f} ₽  ({cash/total*100:.0f}%)")
 
-    lines += [
-        "",
-        "━━━━ РАСПРЕДЕЛЕНИЕ ━━━━",
-    ]
-    for sec, info in SECTOR_LABELS.items():
-        lines.append(f"{info}")
+    # Позиции (только акции, первые 15)
+    stock_positions = [p for p in positions if p["type"] == "share"]
+    if stock_positions:
+        lines.append("\n━━━━ ПОЗИЦИИ ━━━━")
+        total_invested = sum(p["avg_price"] * p["quantity"] for p in stock_positions if p["avg_price"])
 
-    lines.append("\n<i>Рекомендуется: не более 40% в одном секторе</i>")
+        for p in sorted(stock_positions, key=lambda x: x["current_price"] * x["quantity"], reverse=True)[:15]:
+            qty   = p["quantity"]
+            cur   = p["current_price"]
+            avg   = p["avg_price"]
+            value = cur * qty
+            pnl   = p["expected_yield"]
+
+            pnl_str = ""
+            if pnl != 0 and avg > 0:
+                pnl_pct = (cur - avg) / avg * 100
+                pnl_sign = "▲" if pnl > 0 else "▼"
+                pnl_str = f" {pnl_sign}{abs(pnl_pct):.1f}%"
+
+            figi = p["figi"]
+            # Попробуем найти тикер по figi из нашего кэша
+            from data.tinkoff_client import _figi_cache
+            rev = {v: k for k, v in _figi_cache.items()}
+            label = rev.get(figi, figi[:8])
+
+            lines.append(
+                f"<code>{label:<8}</code> {qty:.0f} шт  "
+                f"<b>{value:,.0f} ₽</b>{pnl_str}"
+            )
+
+    # Суммарный P&L
+    total_pnl = sum(p["expected_yield"] for p in stock_positions)
+    if total_pnl != 0:
+        sign = "▲" if total_pnl > 0 else "▼"
+        lines.append(f"\n{sign} Незафикс. прибыль: <b>{abs(total_pnl):,.0f} ₽</b>")
 
     text = "\n".join(lines)
     if edit:
-        await target.edit_text(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
+        await target.edit_text(text, parse_mode="HTML", reply_markup=kb.portfolio_menu())
     else:
-        await target.answer(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
+        await target.answer(text, parse_mode="HTML", reply_markup=kb.portfolio_menu())
 
 
 async def _handle_watchlist(target, user_id: int, edit: bool = False):

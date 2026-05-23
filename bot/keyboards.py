@@ -129,6 +129,16 @@ def watchlist_manage(tickers: list[str]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def portfolio_menu() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔄 Обновить",    callback_data="menu:portfolio"),
+        InlineKeyboardButton(text="📋 Вотчлист",    callback_data="menu:watchlist"),
+    )
+    builder.row(InlineKeyboardButton(text="◀️ Меню", callback_data="menu:main"))
+    return builder.as_markup()
+
+
 def back_to_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="◀️ Меню", callback_data="menu:main"))

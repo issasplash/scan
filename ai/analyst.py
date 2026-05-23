@@ -80,13 +80,17 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
 
 
 async def _gemini(prompt: str) -> str:
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction=_SYSTEM,
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    response = await client.aio.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=_SYSTEM,
+            max_output_tokens=1000,
+        ),
     )
-    response = await model.generate_content_async(prompt)
     return response.text.strip()
 
 
