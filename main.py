@@ -18,6 +18,18 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
+async def _warmup_news():
+    """Фоновая загрузка новостей при первом старте."""
+    await asyncio.sleep(5)  # дать боту подняться
+    try:
+        from data.news_fetcher import refresh_all_news
+        logger.info("Загрузка кэша новостей...")
+        await refresh_all_news()
+        logger.info("Кэш новостей готов")
+    except Exception as e:
+        logger.warning("News warmup error: %s", e)
+
+
 async def main():
     await init_db()
     logger.info("БД инициализирована")
@@ -45,6 +57,9 @@ async def main():
     scheduler = setup_scheduler(bot)
     scheduler.start()
     logger.info("Планировщик запущен")
+
+    # Фоновый прогрев кэша новостей при старте
+    asyncio.create_task(_warmup_news())
 
     logger.info("Бот запущен")
     try:

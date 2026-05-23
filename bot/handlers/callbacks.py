@@ -337,6 +337,22 @@ async def _handle_analyze(target, ticker: str, edit: bool = False):
     result = await generate_signal(ticker, candles, fundamentals, dividends, macro, prices.get(ticker))
     result.ai_text = await get_ai_analysis(result, macro, news)
 
+    # Сохраняем сигнал в историю
+    try:
+        from db.models import SessionLocal, SignalHistory
+        async with SessionLocal() as db:
+            db.add(SignalHistory(
+                ticker=ticker,
+                signal=result.signal,
+                confidence=result.confidence,
+                score_tech=float(result.tech.score) if result.tech else None,
+                score_fund=float(result.fund.score) if result.fund else None,
+                price=result.price,
+            ))
+            await db.commit()
+    except Exception:
+        pass
+
     text = _format_analysis(result)
     markup = kb.stock_detail(ticker)
 

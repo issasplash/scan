@@ -192,6 +192,15 @@ async def task_cache_macro():
         await session.commit()
 
 
+async def task_refresh_news():
+    """Обновляет кэш новостей для всех акций каждый час."""
+    from data.news_fetcher import refresh_all_news
+    try:
+        await refresh_all_news()
+    except Exception as e:
+        logger.warning("News refresh error: %s", e)
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     h, m = MORNING_BRIEF_TIME.split(":")
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
@@ -215,6 +224,11 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler.add_job(
         task_cache_macro, CronTrigger(hour=9, minute=5, day_of_week="mon-fri"),
         id="cache_macro", replace_existing=True,
+    )
+    # Обновление кэша новостей каждый час
+    scheduler.add_job(
+        task_refresh_news, CronTrigger(minute=15),
+        id="refresh_news", replace_existing=True,
     )
 
     return scheduler

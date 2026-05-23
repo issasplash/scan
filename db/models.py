@@ -115,6 +115,18 @@ class SignalHistory(Base):
     price       = Column(Float)
 
 
+class NewsCache(Base):
+    __tablename__ = "news_cache"
+    __table_args__ = (UniqueConstraint("ticker", "url"),)
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    ticker       = Column(String(10), nullable=False, index=True)
+    title        = Column(Text, nullable=False)
+    url          = Column(Text, default="")
+    published_at = Column(DateTime)
+    fetched_at   = Column(DateTime, default=datetime.utcnow)
+
+
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
