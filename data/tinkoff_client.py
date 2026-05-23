@@ -129,13 +129,32 @@ async def _find_instrument(ticker: str) -> dict | None:
 async def _find_figi(ticker: str) -> str | None:
     if ticker in _figi_cache:
         return _figi_cache[ticker]
+    # ShareBy возвращает полный объект инструмента включая assetUid
+    for class_code in ("TQBR", "TQTF", "TQIF"):
+        try:
+            data = await _post(
+                "tinkoff.public.invest.api.contract.v1.InstrumentsService/ShareBy",
+                {"idType": "ID_TYPE_TICKER", "classCode": class_code, "id": ticker},
+            )
+            inst = data.get("instrument", {})
+            figi = inst.get("figi", "")
+            if figi:
+                _figi_cache[ticker] = figi
+                uid = inst.get("assetUid", "")
+                if uid:
+                    _uid_cache[ticker] = uid
+                return figi
+        except Exception:
+            pass
+    # Fallback: FindInstrument (не содержит assetUid, но хотя бы figi)
     inst = await _find_instrument(ticker)
     if inst:
         figi = inst.get("figi", "")
         if figi:
             _figi_cache[ticker] = figi
-            if inst.get("assetUid"):
-                _uid_cache[ticker] = inst["assetUid"]
+            uid = inst.get("assetUid", "")
+            if uid:
+                _uid_cache[ticker] = uid
             return figi
     logger.warning("FIGI не найден для %s", ticker)
     return None
@@ -230,16 +249,23 @@ async def get_fundamentals(ticker: str) -> dict[str, Any]:
         # Используем кэш assetUid если уже есть
         asset_uid = _uid_cache.get(ticker)
         if not asset_uid:
-            inst = await _find_instrument(ticker)
-            if not inst:
-                logger.warning("Fundamentals: инструмент не найден для %s", ticker)
-                return {}
-            asset_uid = inst.get("assetUid", "")
-            if asset_uid:
-                _uid_cache[ticker] = asset_uid
+            # ShareBy возвращает полный объект с assetUid
+            for class_code in ("TQBR", "TQTF", "TQIF"):
+                try:
+                    data = await _post(
+                        "tinkoff.public.invest.api.contract.v1.InstrumentsService/ShareBy",
+                        {"idType": "ID_TYPE_TICKER", "classCode": class_code, "id": ticker},
+                    )
+                    uid = data.get("instrument", {}).get("assetUid", "")
+                    if uid:
+                        _uid_cache[ticker] = uid
+                        asset_uid = uid
+                        break
+                except Exception:
+                    pass
 
         if not asset_uid:
-            logger.warning("Fundamentals: assetUid пустой для %s", ticker)
+            logger.debug("Fundamentals: assetUid не найден для %s", ticker)
             return {}
 
         fund_data = await _post(

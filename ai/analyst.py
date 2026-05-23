@@ -79,41 +79,69 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
     return "\n".join(l for l in lines if l is not None)
 
 
-async def _gemini(prompt: str) -> str:
+_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]
+
+
+async def _gemini_call(prompt: str, model: str) -> str:
     import aiohttp
+    import ssl
     url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent?key={GEMINI_API_KEY}"
     )
     body = {
         "system_instruction": {"parts": [{"text": _SYSTEM}]},
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": 1000},
     }
-    for attempt in range(3):
-        if attempt > 0:
-            wait = 15 * attempt
-            logger.info("Gemini повтор %d/3, жду %ds...", attempt + 1, wait)
-            await asyncio.sleep(wait)  # спим ДО запроса, вне контекста сессии
-
-        async with aiohttp.ClientSession() as session:
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    conn = aiohttp.TCPConnector(ssl=ssl_ctx, force_close=True)
+    try:
+        async with aiohttp.ClientSession(connector=conn) as session:
             async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=30)) as r:
-                data = await r.json()  # всегда читаем ответ полностью
+                data = await r.json(content_type=None)
+    finally:
+        await conn.close()
 
-        if "error" in data:
-            code = data["error"].get("code", 0)
-            msg = data["error"].get("message", "")
-            if code == 429:
-                logger.warning("Gemini 429: %s (попытка %d/3)", msg, attempt + 1)
-                continue
-            raise RuntimeError(f"Gemini error {code}: {msg}")
+    if "error" in data:
+        code = data["error"].get("code", 0)
+        msg = data["error"].get("message", "")
+        raise RuntimeError(f"Gemini error {code}: {msg}")
 
-        candidates = data.get("candidates", [])
-        if candidates:
-            return candidates[0]["content"]["parts"][0]["text"].strip()
-        raise RuntimeError("Gemini: пустой ответ")
+    candidates = data.get("candidates", [])
+    if candidates:
+        parts = candidates[0].get("content", {}).get("parts", [])
+        if parts:
+            return parts[0].get("text", "").strip()
+    raise RuntimeError(f"Gemini ({model}): пустой ответ, data={data}")
 
-    raise RuntimeError("Gemini: превышен лимит запросов после 3 попыток")
+
+async def _gemini(prompt: str) -> str:
+    last_err: Exception | None = None
+    for model in _GEMINI_MODELS:
+        for attempt in range(2):
+            if attempt > 0:
+                await asyncio.sleep(10)
+            try:
+                result = await _gemini_call(prompt, model)
+                logger.debug("Gemini OK (%s)", model)
+                return result
+            except RuntimeError as e:
+                msg = str(e)
+                if "429" in msg:
+                    logger.warning("Gemini 429 (%s), жду 20s...", model)
+                    await asyncio.sleep(20)
+                    continue
+                logger.warning("Gemini (%s) попытка %d: %s", model, attempt + 1, msg)
+                last_err = e
+                break  # этот model не работает, пробуем следующий
+            except Exception as e:
+                logger.warning("Gemini (%s) сетевая ошибка: %s", model, e)
+                last_err = e
+                break
+    raise RuntimeError(f"Все Gemini модели недоступны. Последняя ошибка: {last_err}")
 
 
 async def _openai(prompt: str) -> str:
@@ -203,5 +231,5 @@ async def get_ai_analysis(result: SignalResult, macro: MacroContext, news: list[
         await _save_cache(result.ticker, text)
         return text
     except Exception as e:
-        logger.error("AI analysis error: %s", e)
-        return "⚠️ ИИ-анализ временно недоступен"
+        logger.error("AI analysis error (%s): %s", AI_PROVIDER, e)
+        return ""  # пустая строка — секция ИИ просто не показывается

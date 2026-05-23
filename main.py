@@ -40,8 +40,19 @@ async def main():
     connector = aiohttp.TCPConnector(ssl=ssl_ctx, force_close=False, enable_cleanup_closed=True)
 
     class NoVerifySession(AiohttpSession):
+        _tg_client: aiohttp.ClientSession | None = None
+
         async def create_session(self) -> aiohttp.ClientSession:
-            return aiohttp.ClientSession(connector=connector, connector_owner=False)
+            if self._tg_client is None or self._tg_client.closed:
+                self._tg_client = aiohttp.ClientSession(
+                    connector=connector, connector_owner=False,
+                )
+            return self._tg_client
+
+        async def close(self) -> None:
+            if self._tg_client and not self._tg_client.closed:
+                await self._tg_client.close()
+            await super().close()
 
     tg_session = NoVerifySession()
 
