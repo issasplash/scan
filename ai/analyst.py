@@ -80,18 +80,25 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
 
 
 async def _gemini(prompt: str) -> str:
-    from google import genai
-    from google.genai import types
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    response = await client.aio.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=_SYSTEM,
-            max_output_tokens=1000,
-        ),
+    import aiohttp
+    import json
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     )
-    return response.text.strip()
+    body = {
+        "system_instruction": {"parts": [{"text": _SYSTEM}]},
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 1000},
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url, json=body,
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as r:
+            r.raise_for_status()
+            data = await r.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
 
 async def _openai(prompt: str) -> str:
@@ -136,4 +143,4 @@ async def get_ai_analysis(result: SignalResult, macro: MacroContext, news: list[
             return ""
     except Exception as e:
         logger.error("AI analysis error: %s", e)
-        return f"(ИИ-анализ недоступен: {e})"
+        return "⚠️ ИИ-анализ временно недоступен"
