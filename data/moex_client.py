@@ -63,10 +63,18 @@ async def _load_board(ticker: str, from_date: date, till_date: date, board: str)
 
 
 async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
-    """Загружает дневные свечи. Пробует MOEX ISS (TQBR/TQNE), затем Yahoo Finance как fallback."""
+    """
+    Загружает дневные свечи.
+    Порядок: MOEX ISS TQBR → TQNE → T-Invest API → Yahoo Finance.
+    T-Invest работает с любого IP, в т.ч. с американского VPS.
+    """
     df = await _load_board(ticker, from_date, till_date, "TQBR")
     if df.empty:
         df = await _load_board(ticker, from_date, till_date, "TQNE")
+    if df.empty:
+        from data.tinkoff_client import get_candles_history
+        logger.info("MOEX недоступен, пробуем T-Invest для %s", ticker)
+        df = await get_candles_history(ticker, from_date, till_date)
     if df.empty:
         df = await _load_yfinance(ticker, from_date, till_date)
     return df

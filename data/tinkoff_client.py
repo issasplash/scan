@@ -1,9 +1,12 @@
 from __future__ import annotations
+import asyncio
 import logging
 import ssl
 import aiohttp
+from datetime import date, timedelta
 from typing import Any
 from config import TINKOFF_API_TOKEN
+import pandas as pd
 
 logger = logging.getLogger("tinkoff")
 
@@ -134,6 +137,63 @@ async def _find_figi(ticker: str) -> str | None:
     except Exception as e:
         logger.debug("FindInstrument %s: %s", ticker, e)
     return None
+
+
+# ─── Historical candles (works from any IP) ───────────────────────────────────
+
+async def get_candles_history(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
+    """
+    Загружает историю дневных свечей через T-Invest API.
+    Работает с любого IP — используй как fallback когда MOEX ISS заблокирован.
+    Лимит API: max 1 год на запрос, поэтому грузим по частям.
+    """
+    if not TINKOFF_API_TOKEN:
+        return pd.DataFrame()
+
+    figi = await _find_figi(ticker)
+    if not figi:
+        logger.warning("T-Invest candles: FIGI не найден для %s", ticker)
+        return pd.DataFrame()
+
+    all_rows = []
+    current = from_date
+    while current < till_date:
+        chunk_end = min(date(current.year + 1, current.month, current.day), till_date)
+        try:
+            data = await _post(
+                "tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles",
+                {
+                    "figi": figi,
+                    "from": f"{current.isoformat()}T00:00:00Z",
+                    "to":   f"{chunk_end.isoformat()}T00:00:00Z",
+                    "interval": "CANDLE_INTERVAL_DAY",
+                },
+            )
+            for c in data.get("candles", []):
+                dt = c.get("time", "")[:10]
+                if not dt:
+                    continue
+                all_rows.append({
+                    "date":   dt,
+                    "open":   _q(c.get("open",   {})),
+                    "high":   _q(c.get("high",   {})),
+                    "low":    _q(c.get("low",    {})),
+                    "close":  _q(c.get("close",  {})),
+                    "volume": float(c.get("volume", 0)),
+                })
+        except Exception as e:
+            logger.debug("T-Invest candles %s %s-%s: %s", ticker, current, chunk_end, e)
+
+        current = chunk_end
+        await asyncio.sleep(0.2)
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows)
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    df = df[df["close"] > 0]
+    return df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
 
 
 # ─── Prices ───────────────────────────────────────────────────────────────────
