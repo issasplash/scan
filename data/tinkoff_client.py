@@ -3,7 +3,7 @@ import asyncio
 import logging
 import ssl
 import aiohttp
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 from config import TINKOFF_API_TOKEN
 import pandas as pd
@@ -12,11 +12,9 @@ logger = logging.getLogger("tinkoff")
 
 _BASE = "https://invest-public-api.tinkoff.ru/rest"
 _SSL = ssl.create_default_context()
-_CONNECTOR = aiohttp.TCPConnector(force_close=True)
 
 
 def _q(quotation: dict) -> float:
-    """Quotation {units, nano} → float."""
     return float(quotation.get("units", 0)) + quotation.get("nano", 0) / 1_000_000_000
 
 
@@ -26,8 +24,7 @@ async def _post(path: str, body: dict) -> dict:
         "Content-Type": "application/json",
     }
     url = f"{_BASE}/{path}"
-    connector = aiohttp.TCPConnector(force_close=True)
-    async with aiohttp.ClientSession(connector=connector) as session:
+    async with aiohttp.ClientSession() as session:
         async with session.post(
             url, json=body, headers=headers,
             ssl=_SSL, timeout=aiohttp.ClientTimeout(total=15),
@@ -39,13 +36,10 @@ async def _post(path: str, body: dict) -> dict:
 # ─── Accounts ─────────────────────────────────────────────────────────────────
 
 async def get_accounts() -> list[dict]:
-    """Возвращает список счетов T-Invest."""
     if not TINKOFF_API_TOKEN:
         return []
     try:
-        data = await _post(
-            "tinkoff.public.invest.api.contract.v1.UsersService/GetAccounts", {}
-        )
+        data = await _post("tinkoff.public.invest.api.contract.v1.UsersService/GetAccounts", {})
         return data.get("accounts", [])
     except Exception as e:
         logger.warning("GetAccounts error: %s", e)
@@ -55,10 +49,6 @@ async def get_accounts() -> list[dict]:
 # ─── Portfolio ────────────────────────────────────────────────────────────────
 
 async def get_portfolio(account_id: str | None = None) -> dict:
-    """
-    Возвращает портфель по счёту.
-    Если account_id не задан — берёт первый доступный счёт.
-    """
     if not TINKOFF_API_TOKEN:
         return {}
     try:
@@ -67,7 +57,6 @@ async def get_portfolio(account_id: str | None = None) -> dict:
             if not accounts:
                 return {}
             account_id = accounts[0]["id"]
-
         data = await _post(
             "tinkoff.public.invest.api.contract.v1.OperationsService/GetPortfolio",
             {"accountId": account_id},
@@ -79,7 +68,6 @@ async def get_portfolio(account_id: str | None = None) -> dict:
 
 
 def _parse_portfolio(raw: dict, account_id: str) -> dict:
-    """Преобразует ответ API в удобный dict."""
     total_shares = _q(raw.get("totalAmountShares", {}))
     total_bonds  = _q(raw.get("totalAmountBonds", {}))
     total_etf    = _q(raw.get("totalAmountEtf", {}))
@@ -88,71 +76,79 @@ def _parse_portfolio(raw: dict, account_id: str) -> dict:
 
     positions = []
     for pos in raw.get("positions", []):
-        itype = pos.get("instrumentType", "")
-        qty   = _q(pos.get("quantity", {}))
+        qty = _q(pos.get("quantity", {}))
         if qty <= 0:
             continue
-        avg   = _q(pos.get("averagePositionPrice", {}))
-        cur   = _q(pos.get("currentPrice", {}))
-        exp_y = _q(pos.get("expectedYield", {}))
         positions.append({
-            "figi":          pos.get("figi", ""),
+            "figi":           pos.get("figi", ""),
             "instrument_uid": pos.get("instrumentUid", ""),
-            "type":          itype,
-            "quantity":      qty,
-            "avg_price":     avg,
-            "current_price": cur,
-            "expected_yield": exp_y,
-            "currency":      pos.get("currentPrice", {}).get("currency", "rub"),
+            "type":           pos.get("instrumentType", ""),
+            "quantity":       qty,
+            "avg_price":      _q(pos.get("averagePositionPrice", {})),
+            "current_price":  _q(pos.get("currentPrice", {})),
+            "expected_yield": _q(pos.get("expectedYield", {})),
+            "currency":       pos.get("currentPrice", {}).get("currency", "rub"),
         })
 
     return {
-        "account_id":    account_id,
-        "total_value":   total_value,
-        "total_shares":  total_shares,
-        "total_bonds":   total_bonds,
-        "total_etf":     total_etf,
-        "total_cash":    total_curr,
-        "positions":     positions,
+        "account_id":   account_id,
+        "total_value":  total_value,
+        "total_shares": total_shares,
+        "total_bonds":  total_bonds,
+        "total_etf":    total_etf,
+        "total_cash":   total_curr,
+        "positions":    positions,
     }
 
 
 # ─── Instrument lookup ────────────────────────────────────────────────────────
 
-_figi_cache: dict[str, str] = {}   # ticker → figi
+_figi_cache: dict[str, str] = {}
+_uid_cache: dict[str, str] = {}   # ticker → assetUid
+
+
+async def _find_instrument(ticker: str) -> dict | None:
+    """Ищет инструмент по тикеру, возвращает первый точный match."""
+    for flag in [False, True]:  # сначала без фильтра, потом с
+        try:
+            body: dict = {"query": ticker, "instrumentKind": "INSTRUMENT_TYPE_SHARE"}
+            if flag:
+                body["apiTradeAvailableFlag"] = True
+            data = await _post(
+                "tinkoff.public.invest.api.contract.v1.InstrumentsService/FindInstrument",
+                body,
+            )
+            for inst in data.get("instruments", []):
+                if inst.get("ticker") == ticker:
+                    return inst
+        except Exception as e:
+            logger.warning("FindInstrument %s (flag=%s): %s", ticker, flag, e)
+    return None
 
 
 async def _find_figi(ticker: str) -> str | None:
     if ticker in _figi_cache:
         return _figi_cache[ticker]
-    try:
-        data = await _post(
-            "tinkoff.public.invest.api.contract.v1.InstrumentsService/FindInstrument",
-            {"query": ticker, "instrumentKind": "INSTRUMENT_TYPE_UNSPECIFIED", "apiTradeAvailableFlag": True},
-        )
-        for inst in data.get("instruments", []):
-            if inst.get("ticker") == ticker:
-                _figi_cache[ticker] = inst["figi"]
-                return inst["figi"]
-    except Exception as e:
-        logger.debug("FindInstrument %s: %s", ticker, e)
+    inst = await _find_instrument(ticker)
+    if inst:
+        figi = inst.get("figi", "")
+        if figi:
+            _figi_cache[ticker] = figi
+            if inst.get("assetUid"):
+                _uid_cache[ticker] = inst["assetUid"]
+            return figi
+    logger.warning("FIGI не найден для %s", ticker)
     return None
 
 
-# ─── Historical candles (works from any IP) ───────────────────────────────────
+# ─── Historical candles ───────────────────────────────────────────────────────
 
 async def get_candles_history(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
-    """
-    Загружает историю дневных свечей через T-Invest API.
-    Работает с любого IP — используй как fallback когда MOEX ISS заблокирован.
-    Лимит API: max 1 год на запрос, поэтому грузим по частям.
-    """
     if not TINKOFF_API_TOKEN:
         return pd.DataFrame()
 
     figi = await _find_figi(ticker)
     if not figi:
-        logger.warning("T-Invest candles: FIGI не найден для %s", ticker)
         return pd.DataFrame()
 
     all_rows = []
@@ -171,18 +167,17 @@ async def get_candles_history(ticker: str, from_date: date, till_date: date) -> 
             )
             for c in data.get("candles", []):
                 dt = c.get("time", "")[:10]
-                if not dt:
-                    continue
-                all_rows.append({
-                    "date":   dt,
-                    "open":   _q(c.get("open",   {})),
-                    "high":   _q(c.get("high",   {})),
-                    "low":    _q(c.get("low",    {})),
-                    "close":  _q(c.get("close",  {})),
-                    "volume": float(c.get("volume", 0)),
-                })
+                if dt:
+                    all_rows.append({
+                        "date":   dt,
+                        "open":   _q(c.get("open", {})),
+                        "high":   _q(c.get("high", {})),
+                        "low":    _q(c.get("low", {})),
+                        "close":  _q(c.get("close", {})),
+                        "volume": float(c.get("volume", 0)),
+                    })
         except Exception as e:
-            logger.debug("T-Invest candles %s %s-%s: %s", ticker, current, chunk_end, e)
+            logger.warning("GetCandles %s %s-%s: %s", ticker, current, chunk_end, e)
 
         current = chunk_end
         await asyncio.sleep(0.2)
@@ -199,16 +194,13 @@ async def get_candles_history(ticker: str, from_date: date, till_date: date) -> 
 # ─── Prices ───────────────────────────────────────────────────────────────────
 
 async def get_last_prices(tickers: list[str]) -> dict[str, float]:
-    """Возвращает последние цены по тикерам через T-Invest REST API."""
     if not TINKOFF_API_TOKEN:
         return {}
     result = {}
     try:
-        figis = {}
-        for t in tickers:
-            figi = await _find_figi(t)
-            if figi:
-                figis[t] = figi
+        # Параллельный поиск FIGI
+        figi_tasks = await asyncio.gather(*[_find_figi(t) for t in tickers], return_exceptions=True)
+        figis = {t: f for t, f in zip(tickers, figi_tasks) if isinstance(f, str) and f}
 
         if not figis:
             return {}
@@ -232,20 +224,22 @@ async def get_last_prices(tickers: list[str]) -> dict[str, float]:
 # ─── Fundamentals ─────────────────────────────────────────────────────────────
 
 async def get_fundamentals(ticker: str) -> dict[str, Any]:
-    """Возвращает фундаментальные показатели через T-Invest REST API."""
     if not TINKOFF_API_TOKEN:
         return {}
     try:
-        data = await _post(
-            "tinkoff.public.invest.api.contract.v1.InstrumentsService/FindInstrument",
-            {"query": ticker, "instrumentKind": "INSTRUMENT_TYPE_UNSPECIFIED", "apiTradeAvailableFlag": True},
-        )
-        instruments = [i for i in data.get("instruments", []) if i.get("ticker") == ticker]
-        if not instruments:
-            return {}
-
-        asset_uid = instruments[0].get("assetUid", "")
+        # Используем кэш assetUid если уже есть
+        asset_uid = _uid_cache.get(ticker)
         if not asset_uid:
+            inst = await _find_instrument(ticker)
+            if not inst:
+                logger.warning("Fundamentals: инструмент не найден для %s", ticker)
+                return {}
+            asset_uid = inst.get("assetUid", "")
+            if asset_uid:
+                _uid_cache[ticker] = asset_uid
+
+        if not asset_uid:
+            logger.warning("Fundamentals: assetUid пустой для %s", ticker)
             return {}
 
         fund_data = await _post(
@@ -254,10 +248,11 @@ async def get_fundamentals(ticker: str) -> dict[str, Any]:
         )
         fundamentals = fund_data.get("fundamentals", [])
         if not fundamentals:
+            logger.info("Fundamentals: нет данных для %s (assetUid=%s)", ticker, asset_uid)
             return {}
 
         f = fundamentals[0]
-        return {
+        result = {
             "pe":             _safe_float(f.get("peRatioTtm")),
             "pb":             _safe_float(f.get("priceToBookTtm")),
             "ev_ebitda":      _safe_float(f.get("evToEbitdaTtm")),
@@ -266,8 +261,11 @@ async def get_fundamentals(ticker: str) -> dict[str, Any]:
             "revenue_growth": _safe_float(f.get("revenueChangeOneYearAgo")),
             "net_margin":     _safe_float(f.get("netMarginTtm")),
         }
+        non_null = {k: v for k, v in result.items() if v is not None}
+        logger.info("Fundamentals %s: %s", ticker, non_null)
+        return result
     except Exception as e:
-        logger.debug("GetFundamentals %s: %s", ticker, e)
+        logger.warning("GetFundamentals %s: %s", ticker, e)
         return {}
 
 

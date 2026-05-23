@@ -15,21 +15,18 @@ _SIGNAL_EMOJI = {
 def main_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📊 Сигналы",     callback_data="menu:signals"),
-        InlineKeyboardButton(text="🔍 Анализ акции", callback_data="menu:pick_stock"),
-    )
-    builder.row(
+        InlineKeyboardButton(text="📊 Акции",        callback_data="menu:pick_stock"),
         InlineKeyboardButton(text="🌍 Макро",        callback_data="menu:macro"),
+    )
+    builder.row(
         InlineKeyboardButton(text="📰 Новости",      callback_data="menu:news_pick"),
-    )
-    builder.row(
         InlineKeyboardButton(text="⚡ Идеи роста",   callback_data="menu:risky"),
-        InlineKeyboardButton(text="🏦 ОФЗ",          callback_data="menu:ofz"),
     )
     builder.row(
+        InlineKeyboardButton(text="🏦 ОФЗ",          callback_data="menu:ofz"),
         InlineKeyboardButton(text="💼 Портфель",     callback_data="menu:portfolio"),
-        InlineKeyboardButton(text="⚙️ Настройки",    callback_data="menu:settings"),
     )
+    builder.row(InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"))
     return builder.as_markup()
 
 
@@ -94,7 +91,7 @@ def news_detail(ticker: str) -> InlineKeyboardMarkup:
 
 
 def settings(
-    alerts: bool, brief: bool, rsi_alerts: bool, news_alerts: bool, bank_size: float | None
+    alerts: bool, brief: bool, rsi_alerts: bool, news_alerts: bool,
 ) -> InlineKeyboardMarkup:
     def tog(val: bool) -> str:
         return "✅ ВКЛ" if val else "❌ ВЫКЛ"
@@ -108,8 +105,6 @@ def settings(
         InlineKeyboardButton(text=f"📊 RSI: {tog(rsi_alerts)}",  callback_data="setting:rsi_alerts"),
         InlineKeyboardButton(text=f"📰 Новости: {tog(news_alerts)}", callback_data="setting:news_alerts"),
     )
-    bank_label = f"{bank_size:,.0f} ₽" if bank_size else "не задан"
-    builder.row(InlineKeyboardButton(text=f"💰 Размер банка: {bank_label}", callback_data="setting:bank"))
     builder.row(
         InlineKeyboardButton(text="📋 Мой вотчлист", callback_data="menu:watchlist"),
         InlineKeyboardButton(text="◀️ Меню",          callback_data="menu:main"),

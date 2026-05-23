@@ -130,6 +130,16 @@ class NewsCache(Base):
     fetched_at   = Column(DateTime, default=datetime.utcnow)
 
 
+class AICache(Base):
+    __tablename__ = "ai_cache"
+    __table_args__ = (UniqueConstraint("ticker"),)
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    ticker       = Column(String(10), nullable=False, index=True)
+    analysis     = Column(Text, nullable=False)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+
+
 async def init_db():
     from sqlalchemy import text
     async with engine.begin() as conn:
@@ -139,6 +149,7 @@ async def init_db():
             "ALTER TABLE news_cache ADD COLUMN source VARCHAR(100) DEFAULT ''",
             "ALTER TABLE macro_data ADD COLUMN imoex_ma50 REAL",
             "ALTER TABLE macro_data ADD COLUMN market_regime VARCHAR(10) DEFAULT 'neutral'",
+            "CREATE TABLE IF NOT EXISTS ai_cache (id INTEGER PRIMARY KEY, ticker VARCHAR(10) UNIQUE NOT NULL, analysis TEXT NOT NULL, created_at DATETIME)",
         ]:
             try:
                 await conn.execute(text(sql))

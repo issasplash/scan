@@ -12,12 +12,12 @@ WELCOME = (
     "👋 <b>Добро пожаловать в инвестиционного помощника!</b>\n\n"
     "Я анализирую российский фондовый рынок и даю рекомендации по акциям.\n\n"
     "<b>Что умею:</b>\n"
-    "📊 <b>Сигналы</b> — голубые фишки с рекомендациями\n"
-    "🔍 <b>Анализ</b> — 5-слойный разбор любой акции\n"
+    "📊 <b>Акции</b> — голубые фишки + 5-слойный анализ с ИИ\n"
     "🌍 <b>Макро</b> — нефть, рубль, ставка ЦБ, ММВБ\n"
-    "📰 <b>Новости</b> — свежие новости с ИИ-оценкой\n"
+    "📰 <b>Новости</b> — свежие новости по любой акции\n"
     "⚡ <b>Идеи роста</b> — нестандартные возможности\n"
-    "🏦 <b>ОФЗ</b> — облигации под текущую ставку\n\n"
+    "🏦 <b>ОФЗ</b> — облигации под текущую ставку\n"
+    "💼 <b>Портфель</b> — позиции из T-Invest\n\n"
     "⚠️ <i>Бот даёт аналитику, не инвестиционные советы.</i>\n"
     "Используй как один из инструментов принятия решений."
 )
@@ -79,42 +79,6 @@ async def cmd_news(message: Message):
 async def cmd_settings(message: Message):
     from bot.handlers.callbacks import _handle_settings
     await _handle_settings(message)
-
-
-@router.message(Command("setbank"))
-async def cmd_setbank(message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer(
-            "Укажи размер банка: <code>/setbank 500000</code>",
-            parse_mode="HTML",
-        )
-        return
-    try:
-        amount = float(parts[1].replace(",", "").replace(" ", ""))
-        if amount <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("❌ Укажи число: <code>/setbank 500000</code>", parse_mode="HTML")
-        return
-
-    from db.models import SessionLocal, User
-    async with SessionLocal() as session:
-        user = await session.get(User, message.from_user.id)
-        if not user:
-            user = User(user_id=message.from_user.id, chat_id=message.chat.id)
-            session.add(user)
-        s = user.get_settings()
-        s["bank_size"] = amount
-        user.set_settings(s)
-        await session.commit()
-
-    await message.answer(
-        f"✅ Размер банка сохранён: <b>{amount:,.0f} ₽</b>\n"
-        f"  Голубые фишки (80%): {amount * 0.8:,.0f} ₽\n"
-        f"  Идеи роста (20%): {amount * 0.2:,.0f} ₽",
-        parse_mode="HTML",
-    )
 
 
 @router.message(Command("watchlist"))

@@ -164,17 +164,7 @@ async def cb_main_menu(cq: CallbackQuery):
 
 @router.callback_query(F.data == "menu:pick_stock")
 async def cb_pick_stock(cq: CallbackQuery):
-    await cq.message.edit_text(
-        "🔍 <b>Выбери акцию для анализа:</b>",
-        parse_mode="HTML",
-        reply_markup=kb.stocks_list(),
-    )
     await cq.answer()
-
-
-@router.callback_query(F.data == "menu:signals")
-async def cb_signals(cq: CallbackQuery):
-    await cq.answer("⏳ Загружаю сигналы...")
     await _handle_signals(cq.message, edit=True)
 
 
@@ -259,13 +249,8 @@ async def cb_setting(cq: CallbackQuery):
             await cq.answer("Сначала /start")
             return
         s = user.get_settings()
-        if key == "bank":
-            await cq.answer("Введи сумму банка командой:\n/setbank 500000", show_alert=True)
-            return
-        # toggle
-        mapping = {"alerts": "alerts", "brief": "brief", "rsi_alerts": "rsi_alerts", "news_alerts": "news_alerts"}
-        if key in mapping:
-            s[mapping[key]] = not s.get(mapping[key], True)
+        if key in ("alerts", "brief", "rsi_alerts", "news_alerts"):
+            s[key] = not s.get(key, True)
             user.set_settings(s)
             await session.commit()
     await _handle_settings(cq.message, user_id=cq.from_user.id, edit=True)
@@ -311,28 +296,37 @@ async def cb_wl_remove(cq: CallbackQuery):
 # ─── Логика экранов ───────────────────────────────────────────────────────────
 
 async def _handle_signals(target, edit: bool = False):
-    from data.tinkoff_client import get_last_prices
-    from config import BLUE_CHIPS
+    """Показывает список акций с кэшированными сигналами из БД. Нет API-запросов."""
+    from db.models import SessionLocal, SignalHistory
+    from sqlalchemy import select
 
-    prices = await get_last_prices(list(BLUE_CHIPS.keys()))
-    macro = await _get_macro()
-
-    lines = ["📊 <b>Сигналы по голубым фишкам</b>\n"]
     signals_map: dict[str, str] = {}
+    last_prices: dict[str, float] = {}
+
+    async with SessionLocal() as session:
+        for ticker in BLUE_CHIPS:
+            row = (await session.execute(
+                select(SignalHistory)
+                .where(SignalHistory.ticker == ticker)
+                .order_by(SignalHistory.created_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+            if row:
+                signals_map[ticker] = row.signal
+                if row.price:
+                    last_prices[ticker] = row.price
+
+    lines = ["📊 <b>Голубые фишки</b>"]
+    if signals_map:
+        lines.append("<i>Кэшированные сигналы. Нажми на акцию для свежего анализа.</i>\n")
+    else:
+        lines.append("<i>Нет данных. Нажми на любую акцию чтобы запустить анализ.</i>\n")
 
     for ticker, info in BLUE_CHIPS.items():
-        candles = await _load_candles(ticker)
-        if candles.empty:
-            lines.append(f"⚪ <b>{ticker}</b> {info['name']} — нет данных")
-            continue
-        from analysis.signals import generate_signal
-        from data.moex_client import get_dividends
-        divs = await get_dividends(ticker)
-        result = await generate_signal(ticker, candles, {}, divs, macro, prices.get(ticker))
-        signals_map[ticker] = result.signal
-        label = _SIGNAL_LABEL.get(result.signal, result.signal)
-        p = f"{result.price:,.0f} ₽" if result.price else ""
-        lines.append(f"{label.split()[0]} <b>{ticker}</b> {info['name']}  {p}")
+        sig = signals_map.get(ticker)
+        emoji = _SIGNAL_LABEL.get(sig, "⚪ —").split()[0] if sig else "⚪"
+        p = f"  {last_prices[ticker]:,.0f} ₽" if ticker in last_prices else ""
+        lines.append(f"{emoji} <b>{ticker}</b> {info['name']}{p}")
 
     text = "\n".join(lines)
     markup = kb.stocks_list(signals_map)
@@ -525,7 +519,6 @@ async def _handle_settings(target, user_id: int | None = None, edit: bool = Fals
         brief=user.brief_enabled,
         rsi_alerts=user.rsi_alerts,
         news_alerts=user.news_alerts,
-        bank_size=user.bank_size,
     )
 
     if edit:
@@ -535,26 +528,16 @@ async def _handle_settings(target, user_id: int | None = None, edit: bool = Fals
 
 
 async def _handle_portfolio(target, user_id: int, edit: bool = False):
-    from data.tinkoff_client import get_portfolio, get_accounts
-    from db.models import SessionLocal, User
+    from data.tinkoff_client import get_portfolio
 
-    async with SessionLocal() as session:
-        user = await session.get(User, user_id)
-
-    bank = user.bank_size if user else None
-
-    # Получаем реальный портфель из T-Invest
     portfolio = await get_portfolio()
 
     if not portfolio:
-        lines = [
-            "💼 <b>Портфель</b>\n",
-            "⚠️ Портфель T-Invest недоступен.",
-            "Проверь TINKOFF_API_TOKEN в .env",
-        ]
-        if bank:
-            lines += ["", f"💰 Банк (вручную): <b>{bank:,.0f} ₽</b>"]
-        text = "\n".join(lines)
+        text = (
+            "💼 <b>Портфель</b>\n\n"
+            "⚠️ Портфель T-Invest недоступен.\n"
+            "Проверь TINKOFF_API_TOKEN в .env"
+        )
         if edit:
             await target.edit_text(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
         else:

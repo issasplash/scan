@@ -1,5 +1,7 @@
 from __future__ import annotations
+import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
 from config import AI_PROVIDER, GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
 from analysis.signals import SignalResult
 from analysis.macro import MacroContext
@@ -12,6 +14,8 @@ _SYSTEM = (
     "Не давай обещаний гарантированной прибыли. "
     "Структурируй ответ чётко по запрошенным пунктам."
 )
+
+_AI_CACHE_TTL_HOURS = 6  # кэш AI-анализа действует 6 часов
 
 
 def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -> str:
@@ -26,7 +30,6 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
         f"MACD: {t.macd:.2f}, Signal: {t.macd_signal:.2f}" if t.macd else "MACD: н/д",
         f"MA20={t.ma20:.1f}, MA50={t.ma50:.1f}, MA200={t.ma200:.1f}" if t.ma200 else "",
         f"Изменение за 30 дней: {t.price_change_30d:+.1f}%" if t.price_change_30d else "",
-        f"Технические сигналы: {'; '.join(t.signals)}" if t.signals else "",
         f"Технический score: {t.score} из ±5",
         "",
         "=== ФУНДАМЕНТАЛ ===",
@@ -52,10 +55,7 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
     if result.filters.warnings:
         lines.append("Предупреждения: " + "; ".join(result.filters.warnings))
 
-    lines += [
-        "",
-        "=== НОВОСТИ ===",
-    ]
+    lines += ["", "=== НОВОСТИ ==="]
     if news:
         for n in news[:4]:
             lines.append(f"• {n['title']}")
@@ -67,7 +67,7 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
         f"=== ИТОГОВЫЙ SCORE: {result.total_score} из ±9 ===",
         f"Предварительный сигнал: {result.signal}, уверенность: {result.confidence}",
         "",
-        "На основе всех данных выше дай мне строго структурированный ответ:",
+        "На основе всех данных выше дай строго структурированный ответ:",
         "1. ВЕРДИКТ (одно из: 🟢 ПОКУПАТЬ / 🟡 ДЕРЖАТЬ / 🔴 ПРОДАВАТЬ / ⏳ ЖДАТЬ)",
         "2. УВЕРЕННОСТЬ (Высокая / Средняя / Низкая)",
         "3. ГОРИЗОНТ (на какой срок рекомендация)",
@@ -81,7 +81,6 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
 
 async def _gemini(prompt: str) -> str:
     import aiohttp
-    import asyncio
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
@@ -92,20 +91,29 @@ async def _gemini(prompt: str) -> str:
         "generationConfig": {"maxOutputTokens": 1000},
     }
     for attempt in range(3):
+        if attempt > 0:
+            wait = 15 * attempt
+            logger.info("Gemini повтор %d/3, жду %ds...", attempt + 1, wait)
+            await asyncio.sleep(wait)  # спим ДО запроса, вне контекста сессии
+
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=body,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as r:
-                if r.status == 429:
-                    wait = 10 * (attempt + 1)
-                    logger.info("Gemini 429 — жду %ds (попытка %d/3)", wait, attempt + 1)
-                    await asyncio.sleep(wait)
-                    continue
-                r.raise_for_status()
-                data = await r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    raise RuntimeError("Gemini API: превышен лимит запросов")
+            async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                data = await r.json()  # всегда читаем ответ полностью
+
+        if "error" in data:
+            code = data["error"].get("code", 0)
+            msg = data["error"].get("message", "")
+            if code == 429:
+                logger.warning("Gemini 429: %s (попытка %d/3)", msg, attempt + 1)
+                continue
+            raise RuntimeError(f"Gemini error {code}: {msg}")
+
+        candidates = data.get("candidates", [])
+        if candidates:
+            return candidates[0]["content"]["parts"][0]["text"].strip()
+        raise RuntimeError("Gemini: пустой ответ")
+
+    raise RuntimeError("Gemini: превышен лимит запросов после 3 попыток")
 
 
 async def _openai(prompt: str) -> str:
@@ -134,20 +142,66 @@ async def _claude(prompt: str) -> str:
     return msg.content[0].text.strip()
 
 
+async def _get_cached(ticker: str) -> str | None:
+    """Возвращает кэшированный AI-анализ если он свежее TTL часов."""
+    try:
+        from db.models import SessionLocal, AICache
+        from sqlalchemy import select
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=_AI_CACHE_TTL_HOURS)
+        async with SessionLocal() as db:
+            row = await db.execute(
+                select(AICache).where(AICache.ticker == ticker)
+            )
+            cached = row.scalar_one_or_none()
+        if cached and cached.created_at >= cutoff.replace(tzinfo=None):
+            logger.debug("AI cache hit for %s", ticker)
+            return cached.analysis
+    except Exception as e:
+        logger.debug("AI cache read error: %s", e)
+    return None
+
+
+async def _save_cache(ticker: str, analysis: str):
+    try:
+        from db.models import SessionLocal, AICache
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        async with SessionLocal() as db:
+            stmt = sqlite_insert(AICache).values(
+                ticker=ticker,
+                analysis=analysis,
+                created_at=datetime.utcnow(),
+            ).on_conflict_do_update(
+                index_elements=["ticker"],
+                set_={"analysis": analysis, "created_at": datetime.utcnow()},
+            )
+            await db.execute(stmt)
+            await db.commit()
+    except Exception as e:
+        logger.debug("AI cache write error: %s", e)
+
+
 async def get_ai_analysis(result: SignalResult, macro: MacroContext, news: list[dict]) -> str:
     """Отправляет контекст в ИИ и возвращает структурированный анализ."""
+    # Проверяем кэш
+    cached = await _get_cached(result.ticker)
+    if cached:
+        return cached
+
     prompt = _build_prompt(result, macro, news)
 
     try:
         if AI_PROVIDER == "gemini" and GEMINI_API_KEY:
-            return await _gemini(prompt)
+            text = await _gemini(prompt)
         elif AI_PROVIDER == "openai" and OPENAI_API_KEY:
-            return await _openai(prompt)
+            text = await _openai(prompt)
         elif AI_PROVIDER == "claude" and ANTHROPIC_API_KEY:
-            return await _claude(prompt)
+            text = await _claude(prompt)
         else:
-            logger.warning("AI provider не настроен, пропускаем ИИ-анализ")
+            logger.warning("AI provider не настроен")
             return ""
+
+        await _save_cache(result.ticker, text)
+        return text
     except Exception as e:
         logger.error("AI analysis error: %s", e)
         return "⚠️ ИИ-анализ временно недоступен"
