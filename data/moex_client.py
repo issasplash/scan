@@ -13,80 +13,60 @@ HEADERS = {"Accept-Encoding": "gzip"}
 
 
 async def _get(session: aiohttp.ClientSession, url: str, params: dict | None = None) -> dict:
-    async with session.get(url, params=params or {}, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as r:
+    async with session.get(url, params=params or {}, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as r:
         r.raise_for_status()
         return await r.json(content_type=None)
 
 
-async def _get_candles_from_board(
-    session: aiohttp.ClientSession,
-    ticker: str,
-    from_date: date,
-    till_date: date,
-    board: str,
-) -> list[dict]:
-    """Загружает свечи с конкретной доски MOEX ISS (с retry)."""
+async def _load_board(ticker: str, from_date: date, till_date: date, board: str) -> pd.DataFrame:
+    """Загружает свечи с одной доски MOEX ISS — собственная сессия, идентично оригиналу."""
     rows = []
     start = 0
     url = f"{BASE}/history/engines/stock/markets/shares/boards/{board}/securities/{ticker}/candles.json"
 
-    while True:
-        params = {"from": str(from_date), "till": str(till_date), "interval": 24, "start": start}
-        data = None
-        for attempt in range(3):
+    async with aiohttp.ClientSession() as session:
+        while True:
+            params = {"from": str(from_date), "till": str(till_date), "interval": 24, "start": start}
             try:
                 data = await _get(session, url, params)
-                break
             except Exception as e:
-                if attempt == 2:
-                    logger.warning("MOEX %s/%s error (3 попытки): %s", board, ticker, e)
-                else:
-                    await asyncio.sleep(2 ** attempt)
-
-        if data is None:
-            break
-
-        candles = data.get("candles", {})
-        cols = candles.get("columns", [])
-        batch = candles.get("data", [])
-        if not batch:
-            break
-
-        col_map = {c: i for i, c in enumerate(cols)}
-        for row in batch:
-            rows.append({
-                "date":   row[col_map["begin"]][:10],
-                "open":   row[col_map["open"]],
-                "high":   row[col_map["high"]],
-                "low":    row[col_map["low"]],
-                "close":  row[col_map["close"]],
-                "volume": row[col_map["volume"]],
-            })
-
-        start += len(batch)
-        if len(batch) < 100:
-            break
-        await asyncio.sleep(0.3)
-
-    return rows
-
-
-async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
-    """Загружает дневные свечи с MOEX ISS. Пробует TQBR, затем TQNE как fallback."""
-    async with aiohttp.ClientSession() as session:
-        rows: list[dict] = []
-        for board in ("TQBR", "TQNE"):
-            rows = await _get_candles_from_board(session, ticker, from_date, till_date, board)
-            if rows:
+                logger.warning("MOEX %s/%s: %s", board, ticker, e)
                 break
-            await asyncio.sleep(0.5)
+
+            candles = data.get("candles", {})
+            cols = candles.get("columns", [])
+            batch = candles.get("data", [])
+            if not batch:
+                break
+
+            col_map = {c: i for i, c in enumerate(cols)}
+            for row in batch:
+                rows.append({
+                    "date":   row[col_map["begin"]][:10],
+                    "open":   row[col_map["open"]],
+                    "high":   row[col_map["high"]],
+                    "low":    row[col_map["low"]],
+                    "close":  row[col_map["close"]],
+                    "volume": row[col_map["volume"]],
+                })
+
+            start += len(batch)
+            if len(batch) < 100:
+                break
+            await asyncio.sleep(0.2)
 
     if not rows:
         return pd.DataFrame()
-
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"]).dt.date
-    df = df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
+    return df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
+
+
+async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
+    """Загружает дневные свечи. Пробует TQBR, затем TQNE как fallback."""
+    df = await _load_board(ticker, from_date, till_date, "TQBR")
+    if df.empty:
+        df = await _load_board(ticker, from_date, till_date, "TQNE")
     return df
 
 
