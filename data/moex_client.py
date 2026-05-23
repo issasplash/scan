@@ -2,7 +2,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, timedelta
-from typing import Any
 import aiohttp
 import pandas as pd
 
@@ -19,7 +18,6 @@ async def _get(session: aiohttp.ClientSession, url: str, params: dict | None = N
 
 
 async def _load_board(ticker: str, from_date: date, till_date: date, board: str) -> pd.DataFrame:
-    """Загружает свечи с одной доски MOEX ISS — собственная сессия, идентично оригиналу."""
     rows = []
     start = 0
     url = f"{BASE}/history/engines/stock/markets/shares/boards/{board}/securities/{ticker}/candles.json"
@@ -30,7 +28,7 @@ async def _load_board(ticker: str, from_date: date, till_date: date, board: str)
             try:
                 data = await _get(session, url, params)
             except Exception as e:
-                logger.warning("MOEX %s/%s: %s", board, ticker, e)
+                logger.debug("MOEX %s/%s: %s", board, ticker, e)
                 break
 
             candles = data.get("candles", {})
@@ -63,11 +61,7 @@ async def _load_board(ticker: str, from_date: date, till_date: date, board: str)
 
 
 async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
-    """
-    Загружает дневные свечи.
-    Порядок: MOEX ISS TQBR → TQNE → T-Invest API → Yahoo Finance.
-    T-Invest работает с любого IP, в т.ч. с американского VPS.
-    """
+    """MOEX ISS TQBR → TQNE → T-Invest → Yahoo Finance."""
     df = await _load_board(ticker, from_date, till_date, "TQBR")
     if df.empty:
         df = await _load_board(ticker, from_date, till_date, "TQNE")
@@ -81,7 +75,7 @@ async def get_candles(ticker: str, from_date: date, till_date: date) -> pd.DataF
 
 
 async def _load_yfinance(ticker: str, from_date: date, till_date: date) -> pd.DataFrame:
-    """Fallback: загружает свечи через Yahoo Finance (TICKER.ME). Работает с любого IP."""
+    """Fallback через Yahoo Finance (TICKER.ME)."""
     try:
         import yfinance as yf
         yf_ticker = f"{ticker}.ME"
@@ -89,21 +83,14 @@ async def _load_yfinance(ticker: str, from_date: date, till_date: date) -> pd.Da
         hist = await loop.run_in_executor(
             None,
             lambda: yf.download(
-                yf_ticker,
-                start=str(from_date),
-                end=str(till_date),
-                progress=False,
-                auto_adjust=True,
+                yf_ticker, start=str(from_date), end=str(till_date),
+                progress=False, auto_adjust=True,
             ),
         )
         if hist.empty:
-            logger.warning("yfinance: нет данных для %s", ticker)
             return pd.DataFrame()
-
-        # yfinance возвращает MultiIndex колонки при auto_adjust — выравниваем
         if isinstance(hist.columns, pd.MultiIndex):
             hist.columns = hist.columns.get_level_values(0)
-
         df = pd.DataFrame({
             "date":   hist.index.date,
             "open":   hist["Open"].values,
@@ -113,44 +100,91 @@ async def _load_yfinance(ticker: str, from_date: date, till_date: date) -> pd.Da
             "volume": hist["Volume"].values,
         })
         df = df.dropna(subset=["close"])
-        df = df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
-        logger.info("yfinance: загружено %d свечей для %s", len(df), ticker)
-        return df
+        df = df[df["close"] > 0]
+        logger.info("yfinance: %d свечей для %s", len(df), ticker)
+        return df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
     except Exception as e:
         logger.warning("yfinance %s: %s", ticker, e)
         return pd.DataFrame()
 
 
+async def _yfinance_last(yf_ticker: str) -> float | None:
+    """Последняя цена через Yahoo Finance."""
+    try:
+        import yfinance as yf
+        loop = asyncio.get_event_loop()
+        hist = await loop.run_in_executor(
+            None,
+            lambda: yf.download(yf_ticker, period="5d", progress=False, auto_adjust=True),
+        )
+        if hist.empty:
+            return None
+        if isinstance(hist.columns, pd.MultiIndex):
+            hist.columns = hist.columns.get_level_values(0)
+        closes = hist["Close"].dropna()
+        return round(float(closes.iloc[-1]), 2) if not closes.empty else None
+    except Exception as e:
+        logger.debug("yfinance last %s: %s", yf_ticker, e)
+        return None
+
+
+async def _yfinance_history(yf_ticker: str, days: int) -> pd.DataFrame:
+    """История закрытий через Yahoo Finance."""
+    try:
+        import yfinance as yf
+        loop = asyncio.get_event_loop()
+        hist = await loop.run_in_executor(
+            None,
+            lambda: yf.download(yf_ticker, period=f"{days}d", progress=False, auto_adjust=True),
+        )
+        if hist.empty:
+            return pd.DataFrame()
+        if isinstance(hist.columns, pd.MultiIndex):
+            hist.columns = hist.columns.get_level_values(0)
+        df = pd.DataFrame({
+            "date":  hist.index.date,
+            "close": hist["Close"].values,
+        })
+        return df.dropna(subset=["close"]).sort_values("date").reset_index(drop=True)
+    except Exception as e:
+        logger.debug("yfinance history %s: %s", yf_ticker, e)
+        return pd.DataFrame()
+
+
 async def get_dividends(ticker: str) -> list[dict]:
-    """Возвращает историю дивидендов и ближайшие выплаты."""
+    """Дивиденды: MOEX ISS → T-Invest API."""
     url = f"{BASE}/securities/{ticker}/dividends.json"
     async with aiohttp.ClientSession() as session:
         try:
             data = await _get(session, url)
+            divs = data.get("dividends", {})
+            cols = divs.get("columns", [])
+            rows = divs.get("data", [])
+            if cols and rows:
+                col_map = {c: i for i, c in enumerate(cols)}
+                result = []
+                for row in rows:
+                    ex_date_str = row[col_map.get("registryclosedate", 0)] if "registryclosedate" in col_map else None
+                    value = row[col_map.get("value", 1)] if "value" in col_map else None
+                    currency = row[col_map.get("currencyid", 2)] if "currencyid" in col_map else "RUB"
+                    if ex_date_str and value:
+                        result.append({"ex_date": ex_date_str, "amount": float(value), "currency": currency or "RUB"})
+                if result:
+                    return sorted(result, key=lambda x: x["ex_date"], reverse=True)
         except Exception as e:
-            logger.warning("MOEX dividends %s: %s", ticker, e)
-            return []
+            logger.debug("MOEX dividends %s: %s", ticker, e)
 
-    divs = data.get("dividends", {})
-    cols = divs.get("columns", [])
-    rows = divs.get("data", [])
-    if not cols or not rows:
-        return []
-
-    col_map = {c: i for i, c in enumerate(cols)}
-    result = []
-    for row in rows:
-        ex_date_str = row[col_map.get("registryclosedate", 0)] if "registryclosedate" in col_map else None
-        value = row[col_map.get("value", 1)] if "value" in col_map else None
-        currency = row[col_map.get("currencyid", 2)] if "currencyid" in col_map else "RUB"
-        if ex_date_str and value:
-            result.append({"ex_date": ex_date_str, "amount": float(value), "currency": currency or "RUB"})
-
-    return sorted(result, key=lambda x: x["ex_date"], reverse=True)
+    # T-Invest fallback
+    try:
+        from data.tinkoff_client import get_dividends_tinkoff
+        return await get_dividends_tinkoff(ticker)
+    except Exception as e:
+        logger.debug("T-Invest dividends %s: %s", ticker, e)
+    return []
 
 
 async def get_usd_rub() -> float | None:
-    """Текущий курс USD/RUB с MOEX."""
+    """USD/RUB: MOEX → Yahoo Finance."""
     url = f"{BASE}/engines/currency/markets/selt/boards/CETS/securities/USD000UTSTOM.json"
     async with aiohttp.ClientSession() as session:
         try:
@@ -160,16 +194,18 @@ async def get_usd_rub() -> float | None:
             rows = md.get("data", [])
             if cols and rows:
                 col_map = {c: i for i, c in enumerate(cols)}
-                last = col_map.get("LAST") or col_map.get("LCURRENTPRICE")
-                if last is not None and rows[0][last]:
-                    return float(rows[0][last])
+                for key in ("LAST", "LCURRENTPRICE"):
+                    idx = col_map.get(key)
+                    if idx is not None and rows[0][idx]:
+                        return float(rows[0][idx])
         except Exception as e:
-            logger.warning("USD/RUB error: %s", e)
-    return None
+            logger.debug("USD/RUB MOEX: %s", e)
+
+    return await _yfinance_last("USDRUB=X")
 
 
 async def get_imoex() -> float | None:
-    """Текущее значение индекса ММВБ (IMOEX)."""
+    """IMOEX текущий: MOEX → Yahoo Finance."""
     url = f"{BASE}/engines/stock/markets/index/securities/IMOEX.json"
     async with aiohttp.ClientSession() as session:
         try:
@@ -184,12 +220,13 @@ async def get_imoex() -> float | None:
                     if idx is not None and rows[0][idx]:
                         return float(rows[0][idx])
         except Exception as e:
-            logger.warning("IMOEX error: %s", e)
-    return None
+            logger.debug("IMOEX MOEX: %s", e)
+
+    return await _yfinance_last("IMOEX.ME")
 
 
 async def get_imoex_history(days: int = 210) -> pd.DataFrame:
-    """История IMOEX за последние N дней для расчёта MA."""
+    """История IMOEX: MOEX → Yahoo Finance."""
     till = date.today()
     frm = till - timedelta(days=days)
     url = f"{BASE}/history/engines/stock/markets/index/boards/SNDX/securities/IMOEX/candles.json"
@@ -209,24 +246,23 @@ async def get_imoex_history(days: int = 210) -> pd.DataFrame:
                 break
             col_map = {c: i for i, c in enumerate(cols)}
             for row in batch:
-                rows.append({
-                    "date":  row[col_map["begin"]][:10],
-                    "close": row[col_map["close"]],
-                })
+                rows.append({"date": row[col_map["begin"]][:10], "close": row[col_map["close"]]})
             start += len(batch)
             if len(batch) < 100:
                 break
             await asyncio.sleep(0.2)
 
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-    return df.sort_values("date").reset_index(drop=True)
+    if rows:
+        df = pd.DataFrame(rows)
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        return df.sort_values("date").reset_index(drop=True)
+
+    logger.info("IMOEX MOEX недоступен, пробуем Yahoo Finance")
+    return await _yfinance_history("IMOEX.ME", days)
 
 
 async def get_ofz_list() -> list[dict]:
-    """Список ОФЗ с доходностью (TQOB board)."""
+    """Список ОФЗ (только MOEX, недоступно с зарубежного VPS)."""
     url = f"{BASE}/engines/stock/markets/bonds/boards/TQOB/securities.json"
     async with aiohttp.ClientSession() as session:
         try:
@@ -256,7 +292,6 @@ async def get_ofz_list() -> list[dict]:
     result = []
     for row in sec_rows:
         secid = row[sc.get("SECID", 0)]
-        # только ОФЗ
         if not str(secid).startswith("SU"):
             continue
         name = row[sc.get("SECNAME", 1)]
@@ -274,12 +309,12 @@ async def get_ofz_list() -> list[dict]:
 
         if yieldatprevwa and matdate:
             result.append({
-                "ticker":   secid,
-                "name":     name,
-                "matdate":  matdate,
-                "yield":    float(yieldatprevwa),
-                "coupon":   float(coupon) if coupon else None,
-                "price":    float(last_price) if last_price else None,
+                "ticker":    secid,
+                "name":      name,
+                "matdate":   matdate,
+                "yield":     float(yieldatprevwa),
+                "coupon":    float(coupon) if coupon else None,
+                "price":     float(last_price) if last_price else None,
                 "facevalue": float(facevalue) if facevalue else 1000,
             })
 

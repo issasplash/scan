@@ -77,16 +77,14 @@ async def task_morning_brief(bot: Bot):
 
 async def task_check_alerts(bot: Bot):
     """Проверяет RSI-алерты и объёмные аномалии."""
-    from data.moex_client import get_dividends
     from data.tinkoff_client import get_last_prices
-    from analysis.macro import get_macro_context
     from analysis.signals import generate_signal
     from analysis.technical import calc_rsi
-    from bot.handlers.callbacks import _load_candles
+    from bot.handlers.callbacks import _load_candles, _get_macro
     import pandas as pd
 
     prices = await get_last_prices(list(BLUE_CHIPS.keys()))
-    macro = await get_macro_context()
+    macro = await _get_macro()  # берём из DB-кэша, не запрашиваем MOEX заново
 
     for ticker in BLUE_CHIPS:
         try:

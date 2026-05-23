@@ -296,13 +296,16 @@ async def cb_wl_remove(cq: CallbackQuery):
 # ─── Логика экранов ───────────────────────────────────────────────────────────
 
 async def _handle_signals(target, edit: bool = False):
-    """Показывает список акций с кэшированными сигналами из БД. Нет API-запросов."""
+    """Реальные цены из T-Invest + кэшированные сигналы из БД (быстро и актуально)."""
+    import asyncio
     from db.models import SessionLocal, SignalHistory
+    from data.tinkoff_client import get_last_prices
     from sqlalchemy import select
 
-    signals_map: dict[str, str] = {}
-    last_prices: dict[str, float] = {}
+    # Параллельно: реальные цены + кэш сигналов
+    prices_task = asyncio.create_task(get_last_prices(list(BLUE_CHIPS.keys())))
 
+    signals_map: dict[str, str] = {}
     async with SessionLocal() as session:
         for ticker in BLUE_CHIPS:
             row = (await session.execute(
@@ -313,20 +316,21 @@ async def _handle_signals(target, edit: bool = False):
             )).scalar_one_or_none()
             if row:
                 signals_map[ticker] = row.signal
-                if row.price:
-                    last_prices[ticker] = row.price
 
-    lines = ["📊 <b>Голубые фишки</b>"]
-    if signals_map:
-        lines.append("<i>Кэшированные сигналы. Нажми на акцию для свежего анализа.</i>\n")
+    prices = await prices_task
+
+    lines = ["📊 <b>Голубые фишки</b>  •  <i>актуальные цены</i>"]
+    if not signals_map:
+        lines.append("<i>Нажми на акцию для первого анализа</i>\n")
     else:
-        lines.append("<i>Нет данных. Нажми на любую акцию чтобы запустить анализ.</i>\n")
+        lines.append("<i>Сигналы из последнего анализа. Нажми для обновления.</i>\n")
 
     for ticker, info in BLUE_CHIPS.items():
         sig = signals_map.get(ticker)
         emoji = _SIGNAL_LABEL.get(sig, "⚪ —").split()[0] if sig else "⚪"
-        p = f"  {last_prices[ticker]:,.0f} ₽" if ticker in last_prices else ""
-        lines.append(f"{emoji} <b>{ticker}</b> {info['name']}{p}")
+        price = prices.get(ticker)
+        p = f"  <b>{price:,.0f} ₽</b>" if price else ""
+        lines.append(f"{emoji} {ticker} {info['name']}{p}")
 
     text = "\n".join(lines)
     markup = kb.stocks_list(signals_map)
@@ -353,12 +357,15 @@ async def _handle_analyze(target, ticker: str, edit: bool = False):
             await target.answer(text, parse_mode="HTML", reply_markup=kb.back_to_menu())
         return
 
-    candles = await _load_candles(ticker)
-    prices = await get_last_prices([ticker])
-    fundamentals = await get_fundamentals(ticker)
-    dividends = await get_dividends(ticker)
-    macro = await _get_macro()
-    news = await fetch_news_for_ticker(ticker)
+    import asyncio
+    candles, prices, fundamentals, dividends, macro, news = await asyncio.gather(
+        _load_candles(ticker),
+        get_last_prices([ticker]),
+        get_fundamentals(ticker),
+        get_dividends(ticker),
+        _get_macro(),
+        fetch_news_for_ticker(ticker),
+    )
 
     result = await generate_signal(ticker, candles, fundamentals, dividends, macro, prices.get(ticker))
     result.ai_text = await get_ai_analysis(result, macro, news)

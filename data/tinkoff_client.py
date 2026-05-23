@@ -275,3 +275,39 @@ def _safe_float(v) -> float | None:
         return val if val is not None and val == val else None  # NaN check
     except (TypeError, ValueError):
         return None
+
+
+# ─── Dividends ────────────────────────────────────────────────────────────────
+
+async def get_dividends_tinkoff(ticker: str) -> list[dict]:
+    """Дивиденды через T-Invest API (fallback когда MOEX недоступен)."""
+    if not TINKOFF_API_TOKEN:
+        return []
+    try:
+        figi = await _find_figi(ticker)
+        if not figi:
+            return []
+        data = await _post(
+            "tinkoff.public.invest.api.contract.v1.InstrumentsService/GetDividends",
+            {
+                "figi": figi,
+                "from": "2018-01-01T00:00:00Z",
+                "to":   "2030-01-01T00:00:00Z",
+            },
+        )
+        dividends = data.get("dividends", [])
+        result = []
+        for d in dividends:
+            # recordDate — дата закрытия реестра (аналог ex_date)
+            ex_date = (d.get("recordDate") or d.get("lastBuyDate") or "")[:10]
+            net = d.get("dividendNet", {})
+            amount = _safe_float(net.get("units", 0)) + (net.get("nano", 0) or 0) / 1_000_000_000
+            currency = net.get("currency", "rub").upper()
+            if ex_date and amount and amount > 0:
+                result.append({"ex_date": ex_date, "amount": amount, "currency": currency})
+        result.sort(key=lambda x: x["ex_date"], reverse=True)
+        logger.info("T-Invest dividends %s: %d records", ticker, len(result))
+        return result
+    except Exception as e:
+        logger.warning("GetDividends %s: %s", ticker, e)
+        return []

@@ -9,10 +9,8 @@ from config import BLUE_CHIPS, RISKY_STOCKS
 
 logger = logging.getLogger("news")
 
-# Google News RSS — работает с любого IP в мире
 _GNEWS = "https://news.google.com/rss/search"
 
-# Поисковые запросы — фокус на событиях, не на цене
 _QUERIES: dict[str, str] = {
     "LKOH":  "Лукойл дивиденды отчёт прибыль санкции",
     "SBER":  "Сбербанк дивиденды отчёт прибыль результаты",
@@ -39,7 +37,6 @@ _QUERIES: dict[str, str] = {
     "ASTR":  "Астра ОС отчёт выручка импортозамещение",
 }
 
-# Шаблонные фразы которые означают "не новость, а шум"
 _BORING_PATTERNS = [
     "торгуются у уровня",
     "торгуется у уровня",
@@ -61,14 +58,13 @@ def _parse_published(entry) -> datetime | None:
     try:
         t = entry.get("published_parsed")
         if t:
-            return datetime(*t[:6], tzinfo=timezone.utc)
+            return datetime(*t[:6])  # naive UTC datetime для хранения в SQLite
     except Exception:
         pass
     return None
 
 
 def _is_interesting(title: str) -> bool:
-    """Отфильтровывает шаблонные заголовки без смысла."""
     low = title.lower()
     return not any(p in low for p in _BORING_PATTERNS)
 
@@ -89,7 +85,6 @@ async def _fetch_gnews(session: aiohttp.ClientSession, ticker: str) -> list[dict
             link = entry.get("link", "")
             pub = _parse_published(entry)
             if title and _is_interesting(title):
-                # Убираем " - Источник" в конце заголовка Google News
                 source = ""
                 if " - " in title:
                     parts = title.rsplit(" - ", 1)
@@ -108,29 +103,43 @@ async def _fetch_gnews(session: aiohttp.ClientSession, ticker: str) -> list[dict
         return []
 
 
-async def refresh_news_for_ticker(ticker: str) -> list[dict]:
-    """Загружает свежие новости из Google News и сохраняет в БД."""
+def _now_naive() -> datetime:
+    """Текущее UTC время без timezone (для хранения в SQLite)."""
+    return datetime.utcnow()
+
+
+async def _save_news_to_db(items: list[dict]) -> None:
+    """Сохраняет новости в БД, обновляет fetched_at при дублях."""
+    if not items:
+        return
     from db.models import SessionLocal, NewsCache
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+    now = _now_naive()
+    async with SessionLocal() as db:
+        for item in items:
+            stmt = sqlite_insert(NewsCache).values(
+                ticker=item["ticker"],
+                title=item["title"],
+                source=item.get("source", ""),
+                url=item["url"] or "",
+                published_at=item["published_at"],
+                fetched_at=now,
+            ).on_conflict_do_update(
+                index_elements=["ticker", "url"],
+                set_={"fetched_at": now},
+            )
+            await db.execute(stmt)
+        await db.commit()
+
+
+async def refresh_news_for_ticker(ticker: str) -> list[dict]:
+    """Загружает свежие новости из Google News и сохраняет в БД."""
     async with aiohttp.ClientSession() as session:
         items = await _fetch_gnews(session, ticker)
-
+    await _save_news_to_db(items)
     if items:
-        async with SessionLocal() as db:
-            for item in items:
-                stmt = sqlite_insert(NewsCache).values(
-                    ticker=item["ticker"],
-                    title=item["title"],
-                    source=item.get("source", ""),
-                    url=item["url"] or "",
-                    published_at=item["published_at"],
-                    fetched_at=datetime.now(timezone.utc),
-                ).on_conflict_do_nothing()
-                await db.execute(stmt)
-            await db.commit()
         logger.debug("News cached for %s: %d items", ticker, len(items))
-
     return items
 
 
@@ -140,41 +149,26 @@ async def refresh_all_news():
     async with aiohttp.ClientSession() as session:
         for ticker in all_tickers:
             items = await _fetch_gnews(session, ticker)
-            if items:
-                from db.models import SessionLocal, NewsCache
-                from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-                async with SessionLocal() as db:
-                    for item in items:
-                        stmt = sqlite_insert(NewsCache).values(
-                            ticker=item["ticker"],
-                            title=item["title"],
-                            source=item.get("source", ""),
-                            url=item["url"] or "",
-                            published_at=item["published_at"],
-                            fetched_at=datetime.now(timezone.utc),
-                        ).on_conflict_do_nothing()
-                        await db.execute(stmt)
-                    await db.commit()
+            await _save_news_to_db(items)
             await asyncio.sleep(0.5)
     logger.info("News refresh complete for %d tickers", len(all_tickers))
 
 
 async def fetch_news_for_ticker(ticker: str, limit: int = 5) -> list[dict]:
     """
-    Возвращает актуальные новости для тикера.
-    Сначала смотрит в кэш БД (если свежее 2 часов), иначе загружает из сети.
+    Новости из кэша БД (если свежее 2 часов), иначе подгружает из сети.
     """
     try:
         from db.models import SessionLocal, NewsCache
         from sqlalchemy import select
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+        cutoff = _now_naive() - timedelta(hours=2)
 
         async with SessionLocal() as db:
             result = await db.execute(
                 select(NewsCache.title, NewsCache.url)
                 .where(NewsCache.ticker == ticker)
-                .where(NewsCache.fetched_at >= cutoff.replace(tzinfo=None))
+                .where(NewsCache.fetched_at >= cutoff)
                 .order_by(NewsCache.fetched_at.desc())
                 .limit(limit)
             )
@@ -183,7 +177,6 @@ async def fetch_news_for_ticker(ticker: str, limit: int = 5) -> list[dict]:
         if cached:
             return [{"title": row.title, "url": row.url or ""} for row in cached]
 
-        # Кэш устарел или пуст — загружаем
         fresh = await refresh_news_for_ticker(ticker)
         return [{"title": i["title"], "url": i["url"]} for i in fresh[:limit]]
     except Exception as e:
