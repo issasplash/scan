@@ -164,24 +164,28 @@ async def fetch_news_for_ticker(ticker: str, limit: int = 5) -> list[dict]:
     Возвращает актуальные новости для тикера.
     Сначала смотрит в кэш БД (если свежее 2 часов), иначе загружает из сети.
     """
-    from db.models import SessionLocal, NewsCache
-    from sqlalchemy import select, delete
+    try:
+        from db.models import SessionLocal, NewsCache
+        from sqlalchemy import select
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
 
-    async with SessionLocal() as db:
-        result = await db.execute(
-            select(NewsCache)
-            .where(NewsCache.ticker == ticker)
-            .where(NewsCache.fetched_at >= cutoff.replace(tzinfo=None))
-            .order_by(NewsCache.fetched_at.desc())
-            .limit(limit)
-        )
-        cached = result.scalars().all()
+        async with SessionLocal() as db:
+            result = await db.execute(
+                select(NewsCache.title, NewsCache.url)
+                .where(NewsCache.ticker == ticker)
+                .where(NewsCache.fetched_at >= cutoff.replace(tzinfo=None))
+                .order_by(NewsCache.fetched_at.desc())
+                .limit(limit)
+            )
+            cached = result.all()
 
-    if cached:
-        return [{"title": n.title, "url": n.url} for n in cached]
+        if cached:
+            return [{"title": row.title, "url": row.url or ""} for row in cached]
 
-    # Кэш устарел или пуст — загружаем
-    fresh = await refresh_news_for_ticker(ticker)
-    return [{"title": i["title"], "url": i["url"]} for i in fresh[:limit]]
+        # Кэш устарел или пуст — загружаем
+        fresh = await refresh_news_for_ticker(ticker)
+        return [{"title": i["title"], "url": i["url"]} for i in fresh[:limit]]
+    except Exception as e:
+        logger.warning("fetch_news_for_ticker %s: %s", ticker, e)
+        return []

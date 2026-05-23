@@ -81,7 +81,7 @@ def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -
 
 async def _gemini(prompt: str) -> str:
     import aiohttp
-    import json
+    import asyncio
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
@@ -91,14 +91,21 @@ async def _gemini(prompt: str) -> str:
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": 1000},
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url, json=body,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as r:
-            r.raise_for_status()
-            data = await r.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    for attempt in range(3):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, json=body,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as r:
+                if r.status == 429:
+                    wait = 10 * (attempt + 1)
+                    logger.info("Gemini 429 — жду %ds (попытка %d/3)", wait, attempt + 1)
+                    await asyncio.sleep(wait)
+                    continue
+                r.raise_for_status()
+                data = await r.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    raise RuntimeError("Gemini API: превышен лимит запросов")
 
 
 async def _openai(prompt: str) -> str:

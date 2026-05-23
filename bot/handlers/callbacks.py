@@ -71,6 +71,11 @@ async def _get_macro():
     return await get_macro_context(imoex_hist)
 
 
+def _esc(s: str) -> str:
+    """Экранирует HTML-спецсимволы в тексте сигналов."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _format_bar(value: float, max_val: float, width: int = 10) -> str:
     filled = min(int(value / max_val * width), width)
     return "▓" * filled + "░" * (width - filled)
@@ -86,7 +91,7 @@ def _format_analysis(result: SignalResult) -> str:
         ch = f" {sign} {abs(t.price_change_30d):.1f}%/30д"
 
     lines = [
-        f"📊 <b>{result.name} ({result.ticker})</b>  •  {p}{ch}",
+        f"📊 <b>{_esc(result.name)} ({result.ticker})</b>  •  {p}{ch}",
         "",
         f"<b>{_SIGNAL_LABEL.get(result.signal, result.signal)}</b>",
         f"Уверенность: {_CONF_LABEL.get(result.confidence, result.confidence)}",
@@ -95,7 +100,7 @@ def _format_analysis(result: SignalResult) -> str:
 
     if result.filters.warnings:
         for w in result.filters.warnings:
-            lines.append(w)
+            lines.append(_esc(w))
         lines.append("")
 
     lines += [
@@ -110,7 +115,7 @@ def _format_analysis(result: SignalResult) -> str:
     if t.support and t.resistance:
         lines.append(f"Поддержка: {t.support:.1f}  Сопротивление: {t.resistance:.1f}")
     for s in t.signals[:3]:
-        lines.append(f"  • {s}")
+        lines.append(f"  • {_esc(s)}")
 
     lines += ["", "━━━━ ФУНДАМЕНТАЛ ━━━━"]
     if f.pe:
@@ -124,12 +129,17 @@ def _format_analysis(result: SignalResult) -> str:
     elif f.days_since_exdate:
         lines.append(f"Последняя отсечка: {f.days_since_exdate} дн. назад")
     for s in f.signals[:2]:
-        lines.append(f"  • {s}")
+        lines.append(f"  • {_esc(s)}")
 
     if result.ai_text:
-        lines += ["", "━━━━ ИИ-АНАЛИЗ ━━━━", result.ai_text]
+        ai_safe = result.ai_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        lines += ["", "━━━━ ИИ-АНАЛИЗ ━━━━", ai_safe]
 
-    return "\n".join(l for l in lines if l is not None)
+    text = "\n".join(l for l in lines if l is not None)
+    # Telegram limit 4096 chars
+    if len(text) > 4000:
+        text = text[:3990] + "\n…"
+    return text
 
 
 # ─── Обработчики событий ──────────────────────────────────────────────────────
