@@ -1,0 +1,13 @@
+aiogram==3.13.0
+tinkoff-investments==0.2.0b67
+google-generativeai==0.8.3
+apscheduler==3.10.4
+aiohttp==3.9.5
+feedparser==6.0.11
+pandas==2.2.2
+numpy==1.26.4
+SQLAlchemy==2.0.30
+aiosqlite==0.20.0
+python-dotenv==1.0.1
+yfinance==0.2.40
+lxml==5.2.2
