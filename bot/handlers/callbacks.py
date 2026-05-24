@@ -157,10 +157,26 @@ def _format_analysis(result: SignalResult) -> str:
     elif f.days_since_exdate and f.days_since_exdate < 60:
         lines.append(f"  📅 Отсечка {f.days_since_exdate} дн. назад")
 
-    # ИИ-анализ
+    # ИИ-анализ — парсим вердикт чтобы выделить его
     if result.ai_text:
-        ai_safe = _esc(result.ai_text)
-        lines += ["", "🤖 <b>ИИ-анализ:</b>", ai_safe]
+        ai_lines = result.ai_text.strip().splitlines()
+        verdict_line = None
+        rest_lines = []
+        for line in ai_lines:
+            stripped = line.strip()
+            if stripped.startswith("🎯") and verdict_line is None:
+                verdict_line = stripped
+            else:
+                rest_lines.append(line)
+
+        lines.append("")
+        lines.append("━━━━━━━━━━━━━━━━")
+        if verdict_line:
+            lines.append(f"<b>{_esc(verdict_line)}</b>")
+            if rest_lines:
+                lines.append(_esc("\n".join(rest_lines).strip()))
+        else:
+            lines.append(_esc(result.ai_text))
 
     text = "\n".join(l for l in lines if l is not None)
     if len(text) > 4000:
@@ -461,7 +477,13 @@ async def _handle_analyze(target, ticker: str, edit: bool = False):
     markup = kb.stock_detail(ticker)
 
     if edit:
-        await target.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        try:
+            await target.edit_text(text, parse_mode="HTML", reply_markup=markup)
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                pass  # контент не изменился — это нормально
+            else:
+                raise
     else:
         await target.answer(text, parse_mode="HTML", reply_markup=markup)
 

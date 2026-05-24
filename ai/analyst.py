@@ -18,101 +18,149 @@ _SYSTEM = (
 _AI_CACHE_TTL_HOURS = 6  # кэш AI-анализа действует 6 часов
 
 
+_SECTOR_PE_NORM = {
+    "oil": 6.0, "metals": 7.0, "finance": 5.0,
+    "consumer": 12.0, "tech": 20.0, "chemicals": 8.0,
+}
+
+_SECTOR_NAME_RU = {
+    "oil": "нефть и газ", "metals": "металлы", "finance": "финансы",
+    "consumer": "потребительский", "tech": "технологии", "chemicals": "химия",
+}
+
+
 def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -> str:
+    from config import BLUE_CHIPS, RISKY_STOCKS
     t = result.tech
     f = result.fund
 
-    # Собираем контекст компактно
-    tech_ctx = []
-    if t.rsi:
-        tech_ctx.append(f"RSI={t.rsi:.0f}")
+    all_stocks = {**BLUE_CHIPS, **RISKY_STOCKS}
+    sector = all_stocks.get(result.ticker, {}).get("sector", "unknown")
+
+    # Техника
+    tech_parts = []
+    if t.rsi is not None:
+        rsi_comment = "перепродано ✅" if t.rsi < 35 else ("перекуплено ⚠️" if t.rsi > 65 else "нейтрально")
+        tech_parts.append(f"RSI={t.rsi:.0f} ({rsi_comment})")
     if t.price_change_30d is not None:
-        tech_ctx.append(f"изм.30д={t.price_change_30d:+.1f}%")
+        tech_parts.append(f"изм.за30д={t.price_change_30d:+.1f}%")
     if t.ma50 and t.ma200:
-        tech_ctx.append(f"MA50={t.ma50:.0f}/MA200={t.ma200:.0f}")
+        trend = "восходящий ✅" if t.ma50 > t.ma200 else "нисходящий ⚠️"
+        tech_parts.append(f"тренд MA50/MA200={trend}")
     if t.support and t.resistance and result.price:
-        tech_ctx.append(f"поддержка={t.support:.0f}/сопр={t.resistance:.0f}")
-    if t.signals:
-        tech_ctx.append("Сигналы: " + "; ".join(t.signals[:3]))
+        rng = t.resistance - t.support
+        if rng > 0:
+            pos_pct = (result.price - t.support) / rng * 100
+            tech_parts.append(f"позиция в диапазоне={pos_pct:.0f}% (0%=поддержка, 100%=сопротивление)")
+    if t.bb_lower and t.bb_upper and result.price:
+        if result.price <= t.bb_lower * 1.02:
+            tech_parts.append("цена у нижней полосы BB — статистически дёшево ✅")
+        elif result.price >= t.bb_upper * 0.98:
+            tech_parts.append("цена у верхней полосы BB — статистически дорого ⚠️")
 
-    fund_ctx = []
-    if f.pe:
-        fund_ctx.append(f"P/E={f.pe:.1f}")
+    # Фундаментал
+    fund_parts = []
+    pe_norm = _SECTOR_PE_NORM.get(sector)
+    if f.pe and f.pe > 0:
+        if pe_norm:
+            discount = (pe_norm - f.pe) / pe_norm * 100
+            if discount > 0:
+                fund_parts.append(f"P/E={f.pe:.1f} (норма сектора {pe_norm:.0f} — дисконт {discount:.0f}% ✅)")
+            else:
+                fund_parts.append(f"P/E={f.pe:.1f} (норма сектора {pe_norm:.0f} — премия {-discount:.0f}% ⚠️)")
+        else:
+            fund_parts.append(f"P/E={f.pe:.1f}")
     if f.pb:
-        fund_ctx.append(f"P/B={f.pb:.1f}")
-    if f.ev_ebitda:
-        fund_ctx.append(f"EV/EBITDA={f.ev_ebitda:.1f}")
+        fund_parts.append(f"P/B={f.pb:.1f}")
     if f.div_yield:
-        fund_ctx.append(f"дивдоходность={f.div_yield:.1f}%")
+        fund_parts.append(f"дивдоходность={f.div_yield:.1f}%")
     if f.debt_ebitda:
-        fund_ctx.append(f"долг/EBITDA={f.debt_ebitda:.1f}")
+        lev = "✅ низкий" if f.debt_ebitda < 1.5 else ("⚠️ высокий" if f.debt_ebitda > 3.0 else "умеренный")
+        fund_parts.append(f"долг/EBITDA={f.debt_ebitda:.1f} ({lev})")
     if f.revenue_growth:
-        fund_ctx.append(f"рост выручки={f.revenue_growth:+.0f}%")
+        fund_parts.append(f"рост выручки={f.revenue_growth:+.0f}%")
     if f.next_ex_date:
-        fund_ctx.append(f"отсечка={f.next_ex_date}")
-    if f.last_dividend:
-        fund_ctx.append(f"посл.дивиденд={f.last_dividend}₽")
-    if f.signals:
-        fund_ctx.append("Сигналы: " + "; ".join(f.signals[:2]))
+        from datetime import date
+        days = (f.next_ex_date - date.today()).days
+        fund_parts.append(f"отсечка через {days} дн. ({f.next_ex_date})")
+    elif f.days_since_exdate and f.days_since_exdate < 30:
+        fund_parts.append(f"отсечка была {f.days_since_exdate} дн. назад — акция может быть слабее ⚠️")
 
-    macro_ctx = []
+    # Макро
+    macro_parts = []
     if macro.brent:
-        macro_ctx.append(f"Brent=${macro.brent:.1f}")
+        macro_parts.append(f"Brent=${macro.brent:.1f}")
     if macro.usd_rub:
-        macro_ctx.append(f"USD/RUB={macro.usd_rub:.1f}")
+        macro_parts.append(f"USD/RUB={macro.usd_rub:.1f}")
     if macro.cbr_rate:
-        macro_ctx.append(f"ставка_ЦБ={macro.cbr_rate}%")
+        macro_parts.append(f"ставка_ЦБ={macro.cbr_rate}%")
     if macro.imoex:
-        macro_ctx.append(f"IMOEX={macro.imoex:.0f}[{macro.market_regime}]")
+        macro_parts.append(f"IMOEX={macro.imoex:.0f} режим={macro.market_regime}")
 
-    filters_ctx = ""
+    # Защитные фильтры
+    filters_str = ""
     if result.filters.blocked:
-        filters_ctx = "⚠️ СТОП: " + "; ".join(result.filters.warnings)
+        filters_str = f"\nФИЛЬТРЫ-СТОП (не покупать!): {'; '.join(result.filters.warnings)}"
     elif result.filters.warnings:
-        filters_ctx = "Предупреждения: " + "; ".join(result.filters.warnings)
+        filters_str = f"\nПРЕДУПРЕЖДЕНИЯ: {'; '.join(result.filters.warnings)}"
 
-    news_ctx = "\n".join(f"• {n['title']}" for n in news[:5]) if news else "нет свежих новостей"
+    # Новости с инструкцией для анализа
+    if news:
+        news_lines = []
+        for n in news[:5]:
+            news_lines.append(f"• {n['title']}")
+        news_ctx = "\n".join(news_lines)
+        news_instruction = "Для каждой новости кратко укажи: позитив/негатив/нейтрально для акции и почему."
+    else:
+        news_ctx = "нет свежих новостей"
+        news_instruction = ""
 
-    price_str = f"{result.price:.2f} ₽" if result.price else "н/д"
+    price_str = f"{result.price:,.0f} ₽" if result.price else "н/д"
+    sector_ru = _SECTOR_NAME_RU.get(sector, sector)
 
-    prompt = f"""Ты — аналитик российского фондового рынка. Дай профессиональный инвестиционный разбор.
+    # Уровни входа только для BUY/WAIT
+    levels_line = ""
+    if result.price and result.signal in ("BUY", "WAIT"):
+        levels_line = f"\n💰 УРОВНИ: Купить от {result.price*0.95:,.0f}₽, стоп {result.price*0.88:,.0f}₽, цель {result.price*1.15:,.0f}₽"
 
-АКЦИЯ: {result.name} ({result.ticker}), цена {price_str}
-СИСТЕМА: score {result.total_score:+d}/±9, предв.сигнал={result.signal}, уверенность={result.confidence}
+    prompt = f"""Ты — аналитик российского фондового рынка ({sector_ru}). Инвестор ждёт конкретный ответ: покупать сейчас или нет.
 
-ТЕХНИКА: {' | '.join(tech_ctx) if tech_ctx else 'нет данных'}
-ФУНДАМЕНТАЛ: {' | '.join(fund_ctx) if fund_ctx else 'нет данных'}
-МАКРО: {' | '.join(macro_ctx) if macro_ctx else 'нет данных'}
-{('ФИЛЬТРЫ: ' + filters_ctx) if filters_ctx else ''}
+АКЦИЯ: {result.name} ({result.ticker}), сектор: {sector_ru}, цена {price_str}
+СКОРИНГ: {result.total_score:+d}/±9 | предв.сигнал={result.signal} | уверенность={result.confidence}
 
-НОВОСТИ:
+ТЕХНИКА: {' | '.join(tech_parts) if tech_parts else 'недостаточно данных'}
+ФУНДАМЕНТАЛ: {' | '.join(fund_parts) if fund_parts else 'нет данных'}
+МАКРО: {' | '.join(macro_parts) if macro_parts else 'нет данных'}{filters_str}
+
+НОВОСТИ (последние):
 {news_ctx}
+{news_instruction}
 
-Дай краткий (5-7 предложений СУММАРНО) структурированный ответ строго в таком формате:
+Дай структурированный ответ СТРОГО в таком формате (не добавляй ничего лишнего):
 
-🎯 ВЫВОД: [одно из: ПОКУПАТЬ / ДЕРЖАТЬ / ПРОДАВАТЬ / ЖДАТЬ] | Горизонт: [1-3 мес / 3-6 мес / 6+ мес]
+🎯 ВЫВОД: [ПОКУПАТЬ СЕЙЧАС / ПОДОЖДАТЬ / ДЕРЖАТЬ / ПРОДАВАТЬ] | Горизонт: [1-3 мес / 3-6 мес / 6+ мес]
 
-💡 ПОЧЕМУ: [2-3 предложения — главные причины рекомендации, конкретно и честно]
+💡 ПОЧЕМУ: [2-3 предложения. Объясни главные причины конкретными цифрами. Упомяни если новости важны для решения.]{levels_line}
 
-⚠️ РИСКИ: [2 конкретных риска одной строкой через ;]
+⚠️ РИСКИ: [ровно 2 конкретных риска через " ; "]
 
-🚀 КАТАЛИЗАТОРЫ: [2 конкретных катализатора одной строкой через ;]
+🚀 КАТАЛИЗАТОРЫ: [ровно 2 конкретных катализатора через " ; "]
 
-{'💰 УРОВНИ: Покупать от ' + f'{result.price*0.95:,.0f}' + '₽, стоп ' + f'{result.price*0.88:,.0f}' + '₽, цель ' + f'{result.price*1.15:,.0f}' + '₽' if result.price and result.signal in ('BUY', 'WAIT') else ''}
-
-Отвечай на русском. Будь конкретным — инвестор принимает реальное решение."""
+Отвечай на русском. Максимум 6 предложений суммарно. Инвестор принимает реальное решение."""
 
     return prompt
 
 
-_GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
+_GEMINI_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"]
 
 
 async def _gemini_call(prompt: str, model: str) -> str:
     import aiohttp
     import ssl
+    # v1beta для flash-lite, v1 для основных моделей
+    api_ver = "v1beta" if "lite" in model else "v1"
     url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"https://generativelanguage.googleapis.com/{api_ver}/models/"
         f"{model}:generateContent?key={GEMINI_API_KEY}"
     )
     body = {
