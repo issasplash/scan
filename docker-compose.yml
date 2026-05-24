@@ -1,10 +1,14 @@
 version: "3.8"
+
 services:
-  arb-scanner-ru:
+  invest-bot:
     build: .
-    container_name: arb-scanner-ru
-    ports:
-      - "8000:8000"
+    container_name: invest-bot
+    restart: unless-stopped
     env_file:
       - .env
-    restart: unless-stopped
+    volumes:
+      - ./data:/app/data    # БД сохраняется между перезапусками
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=Europe/Moscow
