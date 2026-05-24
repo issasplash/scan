@@ -96,59 +96,73 @@ def _format_bar(value: float, max_val: float, width: int = 10) -> str:
 def _format_analysis(result: SignalResult) -> str:
     t = result.tech
     f = result.fund
-    p = f"{result.price:,.2f} ₽" if result.price else "н/д"
+    p = f"{result.price:,.0f} ₽" if result.price else "н/д"
     ch = ""
     if t.price_change_30d is not None:
         sign = "▲" if t.price_change_30d >= 0 else "▼"
-        ch = f" {sign} {abs(t.price_change_30d):.1f}%/30д"
+        ch = f"  {sign} {abs(t.price_change_30d):.1f}%/мес"
 
     lines = [
-        f"📊 <b>{_esc(result.name)} ({result.ticker})</b>  •  {p}{ch}",
+        f"<b>{_esc(result.name)}</b>  ({result.ticker})  •  <b>{p}</b>{ch}",
         "",
-        f"<b>{_SIGNAL_LABEL.get(result.signal, result.signal)}</b>",
-        f"Уверенность: {_CONF_LABEL.get(result.confidence, result.confidence)}",
+        f"<b>{_SIGNAL_LABEL.get(result.signal, result.signal)}</b>  "
+        f"•  {_CONF_LABEL.get(result.confidence, result.confidence)}",
         "",
     ]
 
+    # Стоп-блоки (самые важные — идут первыми)
     if result.filters.warnings:
         for w in result.filters.warnings:
             lines.append(_esc(w))
         lines.append("")
 
-    lines += [
-        "━━━━ ТЕХНИЧЕСКИЙ АНАЛИЗ ━━━━",
-        f"RSI(14): <b>{t.rsi:.0f}</b>" if t.rsi else "RSI: н/д",
-    ]
-    if t.macd is not None and t.macd_signal is not None:
-        macd_dir = "↑" if t.macd > t.macd_signal else "↓"
-        lines.append(f"MACD: {t.macd:.1f} {macd_dir} Signal {t.macd_signal:.1f}")
-    if t.ma20 and t.ma50 and t.ma200:
-        lines.append(f"MA: 20={t.ma20:.0f}  50={t.ma50:.0f}  200={t.ma200:.0f}")
+    # Ключевые технические сигналы (только самые значимые)
+    key_signals = t.signals[:4]
+    if key_signals:
+        lines.append("📈 <b>Техника:</b>")
+        for s in key_signals:
+            lines.append(f"  {_esc(s)}")
+
+    # RSI + уровни в одну строку
+    tech_line_parts = []
+    if t.rsi is not None:
+        tech_line_parts.append(f"RSI {t.rsi:.0f}")
     if t.support and t.resistance:
-        lines.append(f"Поддержка: {t.support:.1f}  Сопротивление: {t.resistance:.1f}")
-    for s in t.signals[:3]:
-        lines.append(f"  • {_esc(s)}")
+        tech_line_parts.append(f"поддержка {t.support:,.0f} — сопр. {t.resistance:,.0f}")
+    if tech_line_parts:
+        lines.append(f"  <i>{' · '.join(tech_line_parts)}</i>")
 
-    lines += ["", "━━━━ ФУНДАМЕНТАЛ ━━━━"]
+    # Фундаментал — только если есть данные
+    fund_parts = []
     if f.pe:
-        lines.append(f"P/E: {f.pe:.1f}")
+        fund_parts.append(f"P/E {f.pe:.1f}")
     if f.div_yield:
-        lines.append(f"Дивдоходность: {f.div_yield:.1f}%")
+        fund_parts.append(f"дивы {f.div_yield:.1f}%")
     if f.debt_ebitda:
-        lines.append(f"Долг/EBITDA: {f.debt_ebitda:.1f}")
-    if f.next_ex_date:
-        lines.append(f"📅 Ближайшая отсечка: {f.next_ex_date}")
-    elif f.days_since_exdate:
-        lines.append(f"Последняя отсечка: {f.days_since_exdate} дн. назад")
-    for s in f.signals[:2]:
-        lines.append(f"  • {_esc(s)}")
+        lev = "низкий" if f.debt_ebitda < 1.5 else ("высокий" if f.debt_ebitda > 3.0 else "умер.")
+        fund_parts.append(f"долг {f.debt_ebitda:.1f}x ({lev})")
 
+    fund_signals = f.signals[:2]
+    if fund_parts or fund_signals:
+        lines.append("")
+        lines.append("📋 <b>Фундаментал:</b>")
+        if fund_parts:
+            lines.append(f"  {' · '.join(fund_parts)}")
+        for s in fund_signals:
+            lines.append(f"  {_esc(s)}")
+
+    # Ближайший дивиденд
+    if f.next_ex_date:
+        lines.append(f"  📅 Отсечка: <b>{f.next_ex_date}</b>")
+    elif f.days_since_exdate and f.days_since_exdate < 60:
+        lines.append(f"  📅 Отсечка {f.days_since_exdate} дн. назад")
+
+    # ИИ-анализ
     if result.ai_text:
-        ai_safe = result.ai_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        lines += ["", "━━━━ ИИ-АНАЛИЗ ━━━━", ai_safe]
+        ai_safe = _esc(result.ai_text)
+        lines += ["", "🤖 <b>ИИ-анализ:</b>", ai_safe]
 
     text = "\n".join(l for l in lines if l is not None)
-    # Telegram limit 4096 chars
     if len(text) > 4000:
         text = text[:3990] + "\n…"
     return text

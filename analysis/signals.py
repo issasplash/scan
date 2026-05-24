@@ -32,26 +32,33 @@ class SignalResult:
     ai_text: str = ""                   # заполняется позже через ai/analyst.py
 
 
-def _confidence(score: int, blocked: bool) -> str:
+def _confidence(score: int, blocked: bool, has_fundamentals: bool) -> str:
     if blocked:
         return "LOW"
-    if abs(score) >= 5:
+    if abs(score) >= 6:
         return "HIGH"
     if abs(score) >= 3:
-        return "MEDIUM"
+        # Без фундаментала уверенность снижаем — нет полной картины
+        return "MEDIUM" if has_fundamentals else "LOW"
     return "LOW"
 
 
-def _signal_from_score(score: int, blocked: bool) -> str:
+def _signal_from_score(score: int, blocked: bool, macro_regime: str, has_fundamentals: bool) -> str:
     if blocked:
         return SIGNAL_WAIT
-    if score >= 4:
+
+    # Медвежий рынок: нужен более сильный сигнал для BUY
+    buy_threshold = 3 if macro_regime == "bearish" else 2
+    sell_threshold = -2
+
+    if score >= buy_threshold + 2:
         return SIGNAL_BUY
-    if score <= -4:
+    if score <= sell_threshold - 2:
         return SIGNAL_SELL
-    if score >= 2:
-        return SIGNAL_BUY
-    if score <= -2:
+    if score >= buy_threshold:
+        # Без фундаментала BUY → WAIT (нет полной уверенности)
+        return SIGNAL_BUY if has_fundamentals else SIGNAL_WAIT
+    if score <= sell_threshold:
         return SIGNAL_SELL
     return SIGNAL_HOLD
 
@@ -89,8 +96,14 @@ async def generate_signal(
     # Слой 4: защитные фильтры
     filters = filter_check(tech, fund, macro)
 
-    signal = _signal_from_score(total, filters.blocked)
-    confidence = _confidence(total, filters.blocked)
+    # Есть ли фундаментальные данные? (влияет на уверенность)
+    has_fund = any([
+        fund.pe, fund.div_yield, fund.debt_ebitda,
+        fund.revenue_growth, fund.pb,
+    ])
+
+    signal = _signal_from_score(total, filters.blocked, macro.market_regime, has_fund)
+    confidence = _confidence(total, filters.blocked, has_fund)
 
     # Текущая цена (из свечей если не передана)
     if price is None and not candles_df.empty:

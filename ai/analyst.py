@@ -21,62 +21,88 @@ _AI_CACHE_TTL_HOURS = 6  # кэш AI-анализа действует 6 час�
 def _build_prompt(result: SignalResult, macro: MacroContext, news: list[dict]) -> str:
     t = result.tech
     f = result.fund
-    lines = [
-        f"Акция: {result.name} ({result.ticker})",
-        f"Текущая цена: {result.price:.2f} ₽" if result.price else "Цена: н/д",
-        "",
-        "=== ТЕХНИЧЕСКИЙ АНАЛИЗ ===",
-        f"RSI(14): {t.rsi:.1f}" if t.rsi else "RSI: н/д",
-        f"MACD: {t.macd:.2f}, Signal: {t.macd_signal:.2f}" if t.macd else "MACD: н/д",
-        f"MA20={t.ma20:.1f}, MA50={t.ma50:.1f}, MA200={t.ma200:.1f}" if t.ma200 else "",
-        f"Изменение за 30 дней: {t.price_change_30d:+.1f}%" if t.price_change_30d else "",
-        f"Технический score: {t.score} из ±5",
-        "",
-        "=== ФУНДАМЕНТАЛ ===",
-        f"P/E: {f.pe:.1f}" if f.pe else "P/E: н/д",
-        f"P/B: {f.pb:.1f}" if f.pb else "",
-        f"EV/EBITDA: {f.ev_ebitda:.1f}" if f.ev_ebitda else "",
-        f"Дивдоходность: {f.div_yield:.1f}%" if f.div_yield else "",
-        f"Долг/EBITDA: {f.debt_ebitda:.1f}" if f.debt_ebitda else "",
-        f"Рост выручки: {f.revenue_growth:+.0f}%" if f.revenue_growth else "",
-        f"Ближайшая отсечка: {f.next_ex_date}" if f.next_ex_date else "",
-        f"Последний дивиденд: {f.last_dividend} ₽" if f.last_dividend else "",
-        f"Фундаментальный score: {f.score} из ±4",
-        "",
-        "=== МАКРО ===",
-        f"Нефть Brent: ${macro.brent:.1f}" if macro.brent else "",
-        f"USD/RUB: {macro.usd_rub:.1f}" if macro.usd_rub else "",
-        f"Ставка ЦБ: {macro.cbr_rate}%" if macro.cbr_rate else "",
-        f"IMOEX: {macro.imoex:.0f}, режим рынка: {macro.market_regime}" if macro.imoex else "",
-        "",
-        "=== ЗАЩИТНЫЕ ФИЛЬТРЫ ===",
-        f"Заблокировано: {'ДА — не покупать сейчас' if result.filters.blocked else 'НЕТ'}",
-    ]
-    if result.filters.warnings:
-        lines.append("Предупреждения: " + "; ".join(result.filters.warnings))
 
-    lines += ["", "=== НОВОСТИ ==="]
-    if news:
-        for n in news[:4]:
-            lines.append(f"• {n['title']}")
-    else:
-        lines.append("Свежих новостей не найдено")
+    # Собираем контекст компактно
+    tech_ctx = []
+    if t.rsi:
+        tech_ctx.append(f"RSI={t.rsi:.0f}")
+    if t.price_change_30d is not None:
+        tech_ctx.append(f"изм.30д={t.price_change_30d:+.1f}%")
+    if t.ma50 and t.ma200:
+        tech_ctx.append(f"MA50={t.ma50:.0f}/MA200={t.ma200:.0f}")
+    if t.support and t.resistance and result.price:
+        tech_ctx.append(f"поддержка={t.support:.0f}/сопр={t.resistance:.0f}")
+    if t.signals:
+        tech_ctx.append("Сигналы: " + "; ".join(t.signals[:3]))
 
-    lines += [
-        "",
-        f"=== ИТОГОВЫЙ SCORE: {result.total_score} из ±9 ===",
-        f"Предварительный сигнал: {result.signal}, уверенность: {result.confidence}",
-        "",
-        "На основе всех данных выше дай строго структурированный ответ:",
-        "1. ВЕРДИКТ (одно из: 🟢 ПОКУПАТЬ / 🟡 ДЕРЖАТЬ / 🔴 ПРОДАВАТЬ / ⏳ ЖДАТЬ)",
-        "2. УВЕРЕННОСТЬ (Высокая / Средняя / Низкая)",
-        "3. ГОРИЗОНТ (на какой срок рекомендация)",
-        "4. ОБЪЯСНЕНИЕ (3-4 предложения — почему именно сейчас)",
-        "5. ГЛАВНЫЕ РИСКИ (2-3 пункта кратко)",
-        "6. КАТАЛИЗАТОРЫ РОСТА (2-3 пункта кратко)",
-    ]
+    fund_ctx = []
+    if f.pe:
+        fund_ctx.append(f"P/E={f.pe:.1f}")
+    if f.pb:
+        fund_ctx.append(f"P/B={f.pb:.1f}")
+    if f.ev_ebitda:
+        fund_ctx.append(f"EV/EBITDA={f.ev_ebitda:.1f}")
+    if f.div_yield:
+        fund_ctx.append(f"дивдоходность={f.div_yield:.1f}%")
+    if f.debt_ebitda:
+        fund_ctx.append(f"долг/EBITDA={f.debt_ebitda:.1f}")
+    if f.revenue_growth:
+        fund_ctx.append(f"рост выручки={f.revenue_growth:+.0f}%")
+    if f.next_ex_date:
+        fund_ctx.append(f"отсечка={f.next_ex_date}")
+    if f.last_dividend:
+        fund_ctx.append(f"посл.дивиденд={f.last_dividend}₽")
+    if f.signals:
+        fund_ctx.append("Сигналы: " + "; ".join(f.signals[:2]))
 
-    return "\n".join(l for l in lines if l is not None)
+    macro_ctx = []
+    if macro.brent:
+        macro_ctx.append(f"Brent=${macro.brent:.1f}")
+    if macro.usd_rub:
+        macro_ctx.append(f"USD/RUB={macro.usd_rub:.1f}")
+    if macro.cbr_rate:
+        macro_ctx.append(f"ставка_ЦБ={macro.cbr_rate}%")
+    if macro.imoex:
+        macro_ctx.append(f"IMOEX={macro.imoex:.0f}[{macro.market_regime}]")
+
+    filters_ctx = ""
+    if result.filters.blocked:
+        filters_ctx = "⚠️ СТОП: " + "; ".join(result.filters.warnings)
+    elif result.filters.warnings:
+        filters_ctx = "Предупреждения: " + "; ".join(result.filters.warnings)
+
+    news_ctx = "\n".join(f"• {n['title']}" for n in news[:5]) if news else "нет свежих новостей"
+
+    price_str = f"{result.price:.2f} ₽" if result.price else "н/д"
+
+    prompt = f"""Ты — аналитик российского фондового рынка. Дай профессиональный инвестиционный разбор.
+
+АКЦИЯ: {result.name} ({result.ticker}), цена {price_str}
+СИСТЕМА: score {result.total_score:+d}/±9, предв.сигнал={result.signal}, уверенность={result.confidence}
+
+ТЕХНИКА: {' | '.join(tech_ctx) if tech_ctx else 'нет данных'}
+ФУНДАМЕНТАЛ: {' | '.join(fund_ctx) if fund_ctx else 'нет данных'}
+МАКРО: {' | '.join(macro_ctx) if macro_ctx else 'нет данных'}
+{('ФИЛЬТРЫ: ' + filters_ctx) if filters_ctx else ''}
+
+НОВОСТИ:
+{news_ctx}
+
+Дай краткий (5-7 предложений СУММАРНО) структурированный ответ строго в таком формате:
+
+🎯 ВЫВОД: [одно из: ПОКУПАТЬ / ДЕРЖАТЬ / ПРОДАВАТЬ / ЖДАТЬ] | Горизонт: [1-3 мес / 3-6 мес / 6+ мес]
+
+💡 ПОЧЕМУ: [2-3 предложения — главные причины рекомендации, конкретно и честно]
+
+⚠️ РИСКИ: [2 конкретных риска одной строкой через ;]
+
+🚀 КАТАЛИЗАТОРЫ: [2 конкретных катализатора одной строкой через ;]
+
+{'💰 УРОВНИ: Покупать от ' + f'{result.price*0.95:,.0f}' + '₽, стоп ' + f'{result.price*0.88:,.0f}' + '₽, цель ' + f'{result.price*1.15:,.0f}' + '₽' if result.price and result.signal in ('BUY', 'WAIT') else ''}
+
+Отвечай на русском. Будь конкретным — инвестор принимает реальное решение."""
+
+    return prompt
 
 
 _GEMINI_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest"]
