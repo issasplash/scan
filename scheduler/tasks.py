@@ -31,48 +31,70 @@ async def _send_to_all_users(bot: Bot, text: str, check_setting: str = "alerts")
 async def task_morning_brief(bot: Bot):
     """Утренний брифинг — топ сигналов и макро."""
     logger.info("Morning brief started")
-    from analysis.macro import get_macro_context
-    from data.moex_client import get_imoex_history, get_dividends
-    from data.tinkoff_client import get_last_prices
-    from analysis.signals import generate_signal, SIGNAL_BUY
+    from db.models import SessionLocal, PricesCache, FundamentalsCache, SignalHistory
+    from sqlalchemy import select
+    from analysis.signals import SIGNAL_BUY
+    from bot.handlers.callbacks import _get_macro
 
-    imoex_hist = await get_imoex_history(210)
-    macro = await get_macro_context(imoex_hist)
-    prices = await get_last_prices(list(BLUE_CHIPS.keys()))
+    # Читаем всё из кэша БД — быстро и без лимитов API
+    async with SessionLocal() as db:
+        price_rows  = (await db.execute(select(PricesCache))).scalars().all()
+        fund_rows   = (await db.execute(select(FundamentalsCache))).scalars().all()
+        signal_rows = (await db.execute(
+            select(SignalHistory)
+            .order_by(SignalHistory.created_at.desc())
+        )).scalars().all()
 
-    buy_signals = []
-    for ticker in BLUE_CHIPS:
-        try:
-            from bot.handlers.callbacks import _load_candles
-            candles = await _load_candles(ticker)
-            if candles.empty:
-                continue
-            divs = await get_dividends(ticker)
-            result = await generate_signal(ticker, candles, {}, divs, macro, prices.get(ticker))
-            if result.signal == SIGNAL_BUY and result.confidence in ("HIGH", "MEDIUM"):
-                buy_signals.append(result)
-        except Exception as e:
-            logger.debug("Brief %s: %s", ticker, e)
+    prices = {r.ticker: r.price for r in price_rows}
+    funds  = {r.ticker: {
+        "pe": r.pe, "pb": r.pb, "ev_ebitda": r.ev_ebitda,
+        "div_yield": r.div_yield, "debt_ebitda": r.debt_ebitda,
+        "revenue_growth": r.revenue_growth, "net_margin": r.net_margin,
+    } for r in fund_rows}
+
+    # Последние сигналы по каждому тикеру
+    seen = set()
+    buy_tickers = []
+    for row in signal_rows:
+        if row.ticker in seen:
+            continue
+        seen.add(row.ticker)
+        if row.signal == SIGNAL_BUY and row.confidence in ("HIGH", "MEDIUM"):
+            buy_tickers.append(row)
+
+    macro = await _get_macro()
 
     lines = ["☀️ <b>Утренний брифинг</b>\n"]
-
     if macro.brent:
-        lines.append(f"🛢 Brent ${macro.brent:.1f}  💵 USD/RUB {macro.usd_rub:.1f}" if macro.usd_rub else f"🛢 Brent ${macro.brent:.1f}")
+        lines.append(
+            f"🛢 Brent ${macro.brent:.1f}"
+            + (f"  💵 USD/RUB {macro.usd_rub:.1f}" if macro.usd_rub else "")
+        )
     if macro.cbr_rate:
-        lines.append(f"🏦 Ставка ЦБ {macro.cbr_rate}%  📈 IMOEX {macro.imoex:.0f}" if macro.imoex else f"🏦 Ставка ЦБ {macro.cbr_rate}%")
+        lines.append(
+            f"🏦 Ставка ЦБ {macro.cbr_rate}%"
+            + (f"  📈 IMOEX {macro.imoex:.0f}" if macro.imoex else "")
+        )
 
-    if buy_signals:
+    if buy_tickers:
         lines.append(f"\n🟢 <b>Интересные идеи дня:</b>")
-        for r in buy_signals[:3]:
-            p = f"{r.price:,.0f} ₽" if r.price else ""
-            lines.append(f"  • <b>{r.ticker}</b> {r.name}  {p}")
+        for row in buy_tickers[:4]:
+            from config import BLUE_CHIPS, RISKY_STOCKS
+            all_stocks = {**BLUE_CHIPS, **RISKY_STOCKS}
+            name = all_stocks.get(row.ticker, {}).get("name", row.ticker)
+            price = prices.get(row.ticker)
+            p = f"  {price:,.0f} ₽" if price else ""
+            f_data = funds.get(row.ticker, {})
+            div = f_data.get("div_yield")
+            extra = f"  div {div:.1f}%" if div else ""
+            lines.append(f"  • <b>{row.ticker}</b> {name}{p}{extra}")
     else:
         lines.append("\n🟡 Явных покупок не найдено — рынок требует внимания")
 
     lines.append("\n/signals — все сигналы  /macro — детали")
 
     await _send_to_all_users(bot, "\n".join(lines), check_setting="brief")
-    logger.info("Morning brief sent to %d users", 1)
+    logger.info("Morning brief sent")
 
 
 async def task_check_alerts(bot: Bot):
